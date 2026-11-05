@@ -347,3 +347,8 @@ details.more[open] > summary { margin-bottom: 10px; }
 .world ul { padding-left: 18px; font-size: 14px; }
 .world li { margin: 4px 0; }
 .world li details pre { white-space: pre-wrap; font-size: 12.5px; background: var(--sunk); padding: 10px; border-radius: 6px; }
+
+/* Settings: one key block per provider */
+.key-provider { display: grid; gap: 12px; }
+.key-provider + .key-provider { border-top: 1px solid var(--rule); padding-top: 22px; }
+.key-provider h3 { margin: 0; font-size: 17px; }

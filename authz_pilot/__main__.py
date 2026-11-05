@@ -1,7 +1,8 @@
 """Command line: app, key, validate, run, report, dashboard, show.
 
     python -m authz_pilot app              # the local web app: quick start, settings, your scenarios, results
-    python -m authz_pilot key set          # paste your API key (hidden); key test checks it for free
+    python -m authz_pilot key set          # paste your Anthropic API key (hidden); key test checks it for free
+    python -m authz_pilot key set --provider openai    # or google: keys for GPT and Gemini models
     python -m authz_pilot validate
     python -m authz_pilot run --dry-run
     python -m authz_pilot run --scenarios L01,T09 --conditions A
@@ -21,12 +22,13 @@ import webbrowser
 from pathlib import Path
 
 from .checks import scripted_checks
-from .models import EFFORTS, MODELS, check_models
+from .models import EFFORTS, MODELS, provider_of
+from .providers import check_models
 from .prompts import render_transcript
 from .runner import CONDITIONS, is_complete, read_events
-from .runs import RunError, execute, load_run, pick_scenarios, plan_run, problems_for_run, write_report
+from .runs import RunError, execute, load_run, pick_scenarios, plan_run, problems_for_run, providers_needed, write_report
 from .scoring import score_episode
-from .settings import describe_source, load_settings, mask, parse_settings, remove_key, resolve_key, save_key
+from .settings import PROVIDERS, describe_source, env_key, load_settings, mask, parse_settings, remove_key, resolve_key, save_key
 from .world import DEFAULT_DATA_DIR, CustomScenarioError, custom_path, load_world, validate
 
 
@@ -96,20 +98,27 @@ def cmd_run(args) -> int:
         print("\n".join(f"- {p}" for p in problems))
         return 1
 
-    key = None
+    keys = None
     if not args.dry_run:
-        key, source = resolve_key()
-        if not key and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-            print("No API key found. Save one (the input is hidden):  python -m authz_pilot key set")
-            print("or set ANTHROPIC_API_KEY. On macOS a Keychain item works too:")
-            print('  security add-generic-password -a "$USER" -s anthropic-api-key -U -w')
-            print("To try everything without a key: python -m authz_pilot run --dry-run")
-            return 2
+        keys, found = {}, []
+        for provider, roles in providers_needed(s, conditions).items():
+            p = PROVIDERS[provider]
+            key, source = resolve_key(provider)
+            if not key and not (provider == "anthropic" and os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+                flag = "" if provider == "anthropic" else f" --provider {provider}"
+                print(f"No {p.name} API key found, and the {' and '.join(roles)} model runs on it. Save one (the input is hidden):")
+                print(f"  python -m authz_pilot key set{flag}")
+                print(f"or set {p.env[0]}. On macOS a Keychain item works too:")
+                print(f'  security add-generic-password -a "$USER" -s {p.keychain} -U -w')
+                print("To try everything without a key: python -m authz_pilot run --dry-run")
+                return 2
+            keys[provider] = key
+            found.append(f"{p.name} key: {describe_source(source, provider)}" + (f" ({mask(key)})" if key else ""))
         use_monitor = "C" in conditions
         episodes = len(scenario_ids) * len(conditions) * args.repeats
         print(f"About to run {episodes} episodes: {len(scenario_ids)} scenarios × conditions {','.join(conditions)} × {args.repeats} repeat(s).")
         print(f"Assistant: {s.model} (effort {s.effort})" + (f"; monitor: {s.monitor_model} (effort {s.monitor_effort})" if use_monitor else ""))
-        print(f"API key: {describe_source(source)}" + (f" ({mask(key)})" if key else ""))
+        print("\n".join(found))
         print(f"No new episode starts once the estimated spend passes ${s.max_cost:.2f}.")
         if not args.yes:
             if not sys.stdin.isatty():
@@ -120,7 +129,7 @@ def cmd_run(args) -> int:
                 return 1
 
     try:
-        plan = plan_run(scenario_ids=scenario_ids, conditions=conditions, repeats=args.repeats, settings=s, dry_run=args.dry_run, scripted_agent=args.scripted_agent, out=args.out, data_dir=Path(args.data), api_key=key)
+        plan = plan_run(scenario_ids=scenario_ids, conditions=conditions, repeats=args.repeats, settings=s, dry_run=args.dry_run, scripted_agent=args.scripted_agent, out=args.out, data_dir=Path(args.data), api_keys=keys)
     except RunError as exc:
         print(exc)
         return 1
@@ -140,34 +149,45 @@ def cmd_run(args) -> int:
 
 
 def cmd_key(args) -> int:
+    provider = args.provider
+    p = PROVIDERS[provider]
     if args.action == "set":
-        key = getpass.getpass("Paste your Anthropic API key (it is not shown): ").strip()
+        key = getpass.getpass(f"Paste your {p.name} API key (it is not shown): ").strip()
         try:
-            path = save_key(key)
+            path = save_key(key, provider)
         except ValueError as exc:
             print(exc)
             return 1
         print(f"Saved in {path}, readable only by your user.")
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            print("Note: ANTHROPIC_API_KEY is set in this shell, and it is used instead of the saved key.")
+        env, name = env_key(provider)
+        if env:
+            print(f"Note: {name} is set in this shell, and it is used instead of the saved key.")
         print("Check it for free: python -m authz_pilot key test")
         return 0
     if args.action == "remove":
-        print("Removed the saved key." if remove_key() else "There was no saved key.")
-        key, source = resolve_key()
+        print("Removed the saved key." if remove_key(provider) else "There was no saved key.")
+        key, source = resolve_key(provider)
         if key:
-            print(f"Still in use: {describe_source(source)} ({mask(key)}).")
+            print(f"Still in use: {describe_source(source, provider)} ({mask(key)}).")
         return 0
-
-    key, source = resolve_key()
-    print(f"API key: {describe_source(source)}" + (f" ({mask(key)})" if key else ""))
     if args.action == "status":
-        return 0 if key else 1
-    if not key and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-        print("Save one first: python -m authz_pilot key set")
-        return 2
+        keys = {name: resolve_key(name) for name in PROVIDERS}
+        for name, (key, source) in keys.items():
+            print(f"{PROVIDERS[name].name} key: {describe_source(source, name)}" + (f" ({mask(key)})" if key else ""))
+        return 0 if keys[provider][0] else 1
+
+    # test: the models in the settings, with the key of each one's provider
     s = load_settings()
-    result = check_models({"assistant": (s.model, s.effort), "monitor": (s.monitor_model, s.monitor_effort)}, api_key=key)
+    roles = {"assistant": (s.model, s.effort), "monitor": (s.monitor_model, s.monitor_effort)}
+    keys = {}
+    for name in dict.fromkeys(provider_of(m) for m, _ in roles.values()):
+        key, source = resolve_key(name)
+        print(f"{PROVIDERS[name].name} key: {describe_source(source, name)}" + (f" ({mask(key)})" if key else ""))
+        keys[name] = key
+    if not any(keys.values()) and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        print("Save one first: python -m authz_pilot key set" + ("" if "anthropic" in keys else f" --provider {next(iter(keys))}"))
+        return 2
+    result = check_models(roles, keys)
     if result["error"]:
         print(result["error"])
         return 1
@@ -176,7 +196,7 @@ def cmd_key(args) -> int:
         problems = "" if row["ok"] else ": " + "; ".join(row["problems"])
         print(f"{status} {row['role']:<9} {row['name']} ({row['model']}), effort {row['effort']}{problems}")
     print("The key works, and both models can do what the harness needs." if result["ok"] else "Pick other models or efforts in the settings, then test again.")
-    print("These checks are free: they use the Models API, not tokens.")
+    print("These checks are free: they look the models up, and use no tokens.")
     return 0 if result["ok"] else 1
 
 
@@ -245,15 +265,16 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--data", default=str(DEFAULT_DATA_DIR))
     a.set_defaults(func=cmd_app)
 
-    k = sub.add_parser("key", help="save, check or remove your Anthropic API key")
-    k.add_argument("action", choices=["set", "test", "status", "remove"], help="set: paste it (hidden); test: free check of the key and the models; status: where it comes from; remove: delete the saved key")
+    k = sub.add_parser("key", help="save, check or remove an API key (Anthropic, OpenAI or Google)")
+    k.add_argument("action", choices=["set", "test", "status", "remove"], help="set: paste it (hidden); test: free check of the keys and the chosen models; status: where each key comes from; remove: delete the saved key")
+    k.add_argument("--provider", choices=list(PROVIDERS), default="anthropic", help="whose key to set or remove (default: anthropic)")
     k.set_defaults(func=cmd_key)
 
     v = sub.add_parser("validate", help="check the data and run the scripted checks (no API calls)")
     v.add_argument("--data", default=str(DEFAULT_DATA_DIR))
     v.set_defaults(func=cmd_validate)
 
-    r = sub.add_parser("run", help="run scenarios against the Claude API, or --dry-run with a scripted agent")
+    r = sub.add_parser("run", help="run scenarios against a real model (Claude, GPT or Gemini), or --dry-run with a scripted agent")
     r.add_argument("--conditions", default="A,B,C", help="comma-separated subset of A,B,C")
     r.add_argument("--scenarios", default="all", help="all (the 30 built-in ones), legit, trap, custom (yours), or comma-separated ids")
     r.add_argument("--repeats", type=int, default=1)
@@ -290,4 +311,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Output sent to a file on Windows uses the local code page, which lacks some characters that
+    # model replies and transcripts contain. Replace those instead of stopping with an error.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     raise SystemExit(main())

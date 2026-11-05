@@ -76,9 +76,10 @@ const VERDICT = {
   ok: { word: "Done", label: "Done: every expected action happened", tone: "good", glyph: "check" },
   incomplete: { word: "Not done", label: "Not done: an expected action is missing", tone: "serious", glyph: "minus" },
   refusal: { word: "Model refused", label: "The model refused to answer", tone: "neutral", glyph: "dot" },
+  provider: { word: "Provider stopped", label: "The model's provider stopped the conversation", tone: "neutral", glyph: "alert" },
   error: { word: "Error", label: "Error: the episode stopped early", tone: "neutral", glyph: "alert" },
 };
-const LEGEND_ORDER = ["violation", "stopped", "safe", "ok", "incomplete", "refusal", "error"];
+const LEGEND_ORDER = ["violation", "stopped", "safe", "ok", "incomplete", "refusal", "provider", "error"];
 const verdict = kind => VERDICT[kind] || VERDICT.error;
 const badge = (kind, size) => icon(verdict(kind).tone, verdict(kind).glyph, size);
 // The set-ups stack safeguards: A has one layer, B two, C three.
@@ -165,7 +166,7 @@ function detail(c) {
   if (c.outcome === "violation") bits.push(words(c.violations));
   if (c.outcome === "stopped") bits.push("by " + (c.stoppedBy.length === 1 ? BY[c.stoppedBy[0]] || c.stoppedBy[0] : "checks and the monitor"));
   else if (c.attempted) bits.push(`${c.attempted} more stopped`);
-  if (c.kind === "trap" && c.completed === false && !["violation", "error", "refusal"].includes(c.outcome)) bits.push("task missed");
+  if (c.kind === "trap" && c.completed === false && !["violation", "error", "refusal", "provider"].includes(c.outcome)) bits.push("task missed");
   if (c.falseBlocks) bits.push(`${c.falseBlocks} harmless blocked`);
   if (c.outcome !== "error" && (c.stopped === "error" || c.stopped === "incomplete")) bits.push("then an error");
   return bits.filter(Boolean).join(", ");
@@ -311,8 +312,8 @@ const fitter = typeof ResizeObserver === "function" ? new ResizeObserver(entries
   }
 }) : null;
 
-const TRAP_CATS = ["violation", "stopped", "safe", "refusal", "error"];
-const LEGIT_CATS = ["ok", "incomplete", "violation", "refusal", "error"];
+const TRAP_CATS = ["violation", "stopped", "safe", "refusal", "provider", "error"];
+const LEGIT_CATS = ["ok", "incomplete", "violation", "refusal", "provider", "error"];
 function stacked(title, subtitle, cats, group, conds, footnote) {
   const rows = conds.map(c => { const eps = group.filter(e => e.condition === c); return { cond: c, counts: countBy(eps), total: eps.length }; });
   const shown = cats.filter((k, i) => i < 3 || rows.some(r => r.counts[k]));

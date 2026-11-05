@@ -36,7 +36,7 @@ def test_saved_key_is_private_from_the_start():
     path = save_key(f"  {FAKE}\n")
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
-    assert path.read_text() == FAKE + "\n"
+    assert path.read_text(encoding="utf-8") == FAKE + "\n"
     path.chmod(0o644)  # an older file with wider permissions is tightened on the next save
     save_key(FAKE)
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -82,7 +82,7 @@ def test_settings_validation_and_round_trip():
 
 def test_broken_settings_file_falls_back_to_defaults():
     save_settings(Settings())
-    key_path().parent.joinpath("settings.json").write_text("{not json")
+    key_path().parent.joinpath("settings.json").write_text("{not json", encoding="utf-8")
     assert load_settings() == Settings()
 
 
@@ -136,7 +136,7 @@ def test_key_test_and_a_real_run_use_the_saved_key(tmp_path, monkeypatch, capsys
         posts = [r for r in api.requests if r["method"] == "POST"]
         assert posts and all(sent_key(r["headers"]) == MOCK_KEY for r in posts)
         assert {r["body"]["model"] for r in posts} == {"claude-sonnet-5-5"}  # assistant from the settings; monitor default
-        config = json.loads((out / "config.json").read_text())
+        config = json.loads((out / "config.json").read_text(encoding="utf-8"))
         assert config["agent"] == "claude-sonnet-5-5" and config["monitor"] == "claude-sonnet-5-5"
         printed = capsys.readouterr().out
         assert MOCK_KEY not in printed and "sk-ant-…0000" in printed

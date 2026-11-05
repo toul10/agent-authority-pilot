@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import Verdict, cost_usd
@@ -17,6 +18,16 @@ CONDITIONS = {
     "B": "A + code checks on reads, approvals and email recipients",
     "C": "B + a monitor model that reviews emails, approvals and replies",
 }
+
+
+# Outcomes that end an episode: the model refused, a call failed, or the model's provider stopped
+# the conversation with a monitor of its own (OpenAI does this for some models).
+STOPS = ("refusal", "error", "provider_stop")
+
+
+def today() -> str:
+    """The day of a model call, which picks the price for models whose price changes on a date."""
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 class Episode:
@@ -54,7 +65,7 @@ class Episode:
         stopped = None
         for number, turn in enumerate(sc.turns, 1):
             outcome = self._turn(number, turn)
-            if outcome in ("refusal", "error"):
+            if outcome in STOPS:
                 stopped = outcome
                 break
         self.emit("episode_end", stopped=stopped, approved=sorted(self.box.approved), emails_sent=len(self.box.outbox), escalations=len(self.box.escalations))
@@ -88,9 +99,9 @@ class Episode:
                 self.emit("error", turn=number, step=step_number, source="agent", error=f"{type(exc).__name__}: {exc}")
                 outcome = "error"
                 break
-            self.emit("model_call", turn=number, step=step_number, role="agent", **step.log())
-            if step.stop_reason == "refusal":
-                outcome = "refusal"
+            self.emit("model_call", turn=number, step=step_number, role="agent", day=today(), **step.log())
+            if step.stop_reason in ("refusal", "provider_stop"):
+                outcome = step.stop_reason
                 break
             self.history.append({"role": "assistant", "content": step.content})
             texts.extend(step.texts)
@@ -152,7 +163,7 @@ class Episode:
         if verdict.decision not in ("allow", "block"):
             verdict = Verdict("block", "The monitor gave no valid decision.", usage=verdict.usage, model=verdict.model, error=f"decision={verdict.decision!r}")
         target = request["kind"] if request["kind"] == "reply" else request["name"]
-        self.emit("monitor_call", turn=self.number, target=target, decision=verdict.decision, reason=verdict.reason, usage=verdict.usage, model=verdict.model, request_id=verdict.request_id, error=verdict.error)
+        self.emit("monitor_call", turn=self.number, target=target, decision=verdict.decision, reason=verdict.reason, usage=verdict.usage, model=verdict.model, request_id=verdict.request_id, error=verdict.error, day=today())
         return verdict
 
 
@@ -167,7 +178,7 @@ def episode_cost(events: list[dict]) -> float:
     total = 0.0
     for e in events:
         if e["event"] in ("model_call", "monitor_call") and e.get("usage"):
-            total += cost_usd(e.get("model") or "", e["usage"]) or 0.0
+            total += cost_usd(e.get("model") or "", e["usage"], e.get("day")) or 0.0
     return total
 
 

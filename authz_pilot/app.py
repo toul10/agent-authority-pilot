@@ -36,12 +36,13 @@ from urllib.parse import urlsplit
 from . import __version__
 from .custom import COUNTS, LIMITS, check_scenario, clean_form, dump, load_raw, next_id, remove, upsert
 from .dashboard import SHORT, build_payload, outcome, render_dashboard
-from .models import EFFORTS, MODEL_INFO, check_models, model_notes
+from .models import EFFORTS, MODEL_INFO, model_notes, provider_of
+from .providers import BASE_ENV, check_models
 from .runner import CONDITIONS, episode_path, is_complete, read_events
-from .runs import RunError, estimate_cost, execute, jobs_of, list_runs, load_run, plan_run, results_dir
+from .runs import RunError, estimate_cost, execute, jobs_of, list_runs, load_run, plan_run, providers_needed, results_dir
 from .scoring import score_episode
 from .settings import LIMITS as SETTING_LIMITS
-from .settings import describe_source, key_path, load_settings, mask, parse_settings, remove_key, resolve_key, save_key, save_settings, settings_path
+from .settings import PROVIDERS, describe_source, env_key, key_path, load_settings, mask, parse_settings, remove_key, resolve_key, save_key, save_settings, settings_path
 from .world import BAIT_TYPES, CUSTOM_ID, DEFAULT_DATA_DIR, EXPECT_TYPES, TRAP_TYPES, CustomScenarioError, World, custom_path, load_world
 
 WEB = Path(__file__).parent / "web"
@@ -56,6 +57,8 @@ STATIC = {
 MAX_BODY = 256 * 1024
 RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,150}$")
 QUICK_START = ["L01", "T05"]  # one legit request and one trap, one message each
+API_NAMES = {"anthropic": "Claude API", "openai": "OpenAI API", "google": "Gemini API"}
+FAMILIES = {"anthropic": "Claude", "openai": "GPT", "google": "Gemini"}  # what the run button says it runs
 
 APP_CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; "
@@ -165,7 +168,7 @@ class App:
         ("POST", r"/api/scenarios", "save"),
         ("DELETE", r"/api/scenarios/([^/]+)", "delete_scenario"),
         ("POST", r"/api/key", "set_key"),
-        ("DELETE", r"/api/key", "delete_key"),
+        ("DELETE", r"/api/key(?:/(anthropic|openai|google))?", "delete_key"),
         ("POST", r"/api/key/test", "test_key"),
         ("POST", r"/api/settings", "set_settings"),
         ("POST", r"/api/estimate", "estimate"),
@@ -185,53 +188,70 @@ class App:
 
     # ------------------------------------------------------------------ status, key, settings
 
-    def key_status(self) -> dict:
-        key, source = resolve_key()
+    def key_status(self, provider: str = "anthropic") -> dict:
+        key, source = resolve_key(provider)
+        token = provider == "anthropic" and bool(os.environ.get("ANTHROPIC_AUTH_TOKEN"))
         return {
-            "present": bool(key) or bool(os.environ.get("ANTHROPIC_AUTH_TOKEN")),
+            "present": bool(key) or token,
             "source": source,
-            "where": describe_source(source),
+            "where": describe_source(source, provider),
             "masked": mask(key),
-            "saved": key_path().is_file(),
-            "saved_file": str(key_path()),
+            "saved": key_path(provider).is_file(),
+            "saved_file": str(key_path(provider)),
+            "env": env_key(provider)[1] or PROVIDERS[provider].env[0],
         }
+
+    def keys_needed(self, settings, conditions: list[str]) -> list[dict]:
+        """The keys a real run with these settings uses, one per provider, for the confirmation."""
+        out = []
+        for provider, roles in providers_needed(settings, conditions).items():
+            k = self.key_status(provider)
+            out.append({"provider": provider, "name": PROVIDERS[provider].name, "api": API_NAMES[provider], "roles": roles, "present": k["present"], "masked": k["masked"]})
+        return out
 
     def status(self, body: dict) -> dict:
         current = self.current
         return {
             "version": __version__,
             "key": self.key_status(),
+            "keys": {p: self.key_status(p) for p in PROVIDERS},
+            "providers": {p: {"name": v.name, "console": v.console, "api": API_NAMES[p], "family": FAMILIES[p]} for p, v in PROVIDERS.items()},
             "api_base": os.environ.get("ANTHROPIC_BASE_URL") or None,
+            "api_bases": {p: os.environ[env] for p, env in BASE_ENV.items() if os.environ.get(env)},
             "settings": asdict(load_settings()),
             "limits": {k: list(v) for k, v in SETTING_LIMITS.items()},
-            "models": [{"id": m, "name": i.name, "price": list(i.price), "provider": i.provider, "group": i.group, "efforts": list(i.effort_levels), "notes": {r: model_notes(i, r) for r in ("assistant", "monitor")}} for m, i in MODEL_INFO.items()],
+            "models": [{"id": m, "name": i.name, "price": list(i.price_on()), "provider": i.provider, "group": i.group, "efforts": list(i.effort_levels), "notes": {r: model_notes(i, r) for r in ("assistant", "monitor")}} for m, i in MODEL_INFO.items()],
             "efforts": list(EFFORTS),
-            "paths": {"settings": str(settings_path()), "key": str(key_path()), "custom": str(self.custom), "results": str(self.results)},
+            "paths": {"settings": str(settings_path()), "key": str(key_path()), "keys": {p: str(key_path(p)) for p in PROVIDERS}, "custom": str(self.custom), "results": str(self.results)},
             "run": {"name": current.name, "status": current.status} if current else None,
             "quick_start": QUICK_START,
         }
 
     def set_key(self, body: dict) -> dict:
-        key = body.get("key")
+        key, provider = body.get("key"), body.get("provider", "anthropic")
+        if provider not in PROVIDERS:
+            raise ApiError(400, "Unknown provider.")
         if not isinstance(key, str):
             raise ApiError(400, "Paste a key first.")
         try:
-            save_key(key)
+            save_key(key, provider)
         except ValueError as exc:
             raise ApiError(400, str(exc)) from None
-        return {"key": self.key_status()}
+        return {"key": self.key_status(provider)}
 
-    def delete_key(self, body: dict) -> dict:
-        removed = remove_key()
-        return {"removed": removed, "key": self.key_status()}
+    def delete_key(self, body: dict, provider: str | None = None) -> dict:
+        provider = provider or "anthropic"
+        removed = remove_key(provider)
+        return {"removed": removed, "key": self.key_status(provider)}
 
     def test_key(self, body: dict) -> dict:
-        key, source = resolve_key()
-        if not key and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-            raise ApiError(400, "No API key yet. Paste one first.")
         s = load_settings()
-        result = check_models({"assistant": (s.model, s.effort), "monitor": (s.monitor_model, s.monitor_effort)}, api_key=key)
-        return result | {"key": self.key_status()}
+        roles = {"assistant": (s.model, s.effort), "monitor": (s.monitor_model, s.monitor_effort)}
+        providers = list(dict.fromkeys(provider_of(m) for m, _ in roles.values()))
+        if not any(self.key_status(p)["present"] for p in providers):
+            raise ApiError(400, "No API key yet. Paste one first.")
+        result = check_models(roles, {p: resolve_key(p)[0] for p in providers})
+        return result | {"key": self.key_status(), "keys": {p: self.key_status(p) for p in PROVIDERS}}
 
     def set_settings(self, body: dict) -> dict:
         settings, problems = parse_settings(body, load_settings())
@@ -344,27 +364,30 @@ class App:
     def estimate(self, body: dict) -> dict:
         world = self.full_world()
         ids, conditions, repeats, settings = self._run_inputs(body, world)
-        return estimate_cost(world, ids, conditions, settings.model, settings.monitor_model, repeats) | {"max_cost": settings.max_cost}
+        return estimate_cost(world, ids, conditions, settings.model, settings.monitor_model, repeats) | {"max_cost": settings.max_cost, "keys": self.keys_needed(settings, conditions)}
 
     def start_run(self, body: dict) -> dict:
         world = self.full_world()
         ids, conditions, repeats, settings = self._run_inputs(body, world)
         mode = body.get("mode")
-        if mode not in ("dry", "claude"):
-            raise ApiError(400, "Choose the scripted assistant (free) or Claude.")
-        key = None
+        if mode not in ("dry", "claude"):  # "claude": any real model, whichever its provider
+            raise ApiError(400, "Choose the scripted assistant (free) or a real model.")
+        keys = None
         if mode == "claude":
             if body.get("confirm_spend") is not True:
-                raise ApiError(400, "A run with Claude costs money, so it needs your confirmation first.")
-            key, _ = resolve_key()
-            if not key and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-                raise ApiError(400, "No API key yet. Add one on the Start page.")
+                raise ApiError(400, "A run with a real model costs money, so it needs your confirmation first.")
+            keys = {}
+            for k in self.keys_needed(settings, conditions):
+                if not k["present"]:
+                    roles = " and ".join(k["roles"])
+                    raise ApiError(400, f"Add your {k['name']} API key first, in Settings: the {roles} model{'s run' if len(k['roles']) > 1 else ' runs'} on the {k['api']}.", missing_key=k["provider"])
+                keys[k["provider"]] = resolve_key(k["provider"])[0]
         label = "-".join(ids) if len(ids) <= 3 else f"{len(ids)}-scenarios"
         with self.lock:
             if self.current and self.current.status == "running":
                 raise ApiError(409, f"Run {self.current.name} is still going. Wait for it, or stop it.", current=self.current.name)
             try:
-                plan = plan_run(scenario_ids=ids, conditions=conditions, repeats=repeats, settings=settings, dry_run=mode == "dry", data_dir=self.data_dir, custom=self.custom, api_key=key, label=label, results=self.results)
+                plan = plan_run(scenario_ids=ids, conditions=conditions, repeats=repeats, settings=settings, dry_run=mode == "dry", data_dir=self.data_dir, custom=self.custom, api_keys=keys, label=label, results=self.results)
             except RunError as exc:
                 raise ApiError(400, str(exc)) from None
             run = LiveRun(plan, dry_run=mode == "dry")

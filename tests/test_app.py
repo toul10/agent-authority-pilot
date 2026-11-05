@@ -91,7 +91,7 @@ def test_the_api_needs_the_token(app):
     assert call(app, "GET", "/api/status", token=False)[0] == 403
     assert call(app, "GET", "/api/status", token="wrong")[0] == 403
     status, headers, body = call(app, "GET", "/api/status")
-    assert status == 200 and body["key"] == {"present": False, "source": "none", "where": body["key"]["where"], "masked": "", "saved": False, "saved_file": body["key"]["saved_file"]}
+    assert status == 200 and body["key"] == {"present": False, "source": "none", "where": body["key"]["where"], "masked": "", "saved": False, "saved_file": body["key"]["saved_file"], "env": "ANTHROPIC_API_KEY"}
     assert "frame-ancestors 'none'" in headers["content-security-policy"]
     assert call(app, "GET", "/api/nothing")[0] == 404
 
@@ -240,6 +240,43 @@ def test_a_claude_run_needs_confirmation_and_uses_the_mock(app, monkeypatch):
 
         status, _, body = call(app, "POST", "/api/key/test", {})
         assert status == 200 and body["ok"] and all(r["method"] in ("GET", "POST") for r in api.requests)
+
+
+def test_a_run_across_providers_needs_each_key_and_uses_the_mocks(app, monkeypatch):
+    from mock_providers import GEMINI_KEY, OPENAI_KEY, MockGemini, MockOpenAI
+
+    with MockAPI() as claude, MockOpenAI() as openai, MockGemini() as gemini:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", claude.url)
+        monkeypatch.setenv("AUTHZ_PILOT_OPENAI_BASE_URL", openai.url)
+        monkeypatch.setenv("AUTHZ_PILOT_GEMINI_BASE_URL", gemini.url)
+        save_key(MOCK_KEY)
+        request = {"scenarios": ["L01"], "conditions": ["A", "C"], "mode": "claude", "model": "gpt-6.1-sol", "effort": "high", "monitor_model": "claude-sonnet-5-5", "confirm_spend": True}
+        status, _, body = call(app, "POST", "/api/estimate", request)
+        assert status == 200 and [(k["provider"], k["roles"], k["present"]) for k in body["keys"]] == [("openai", ["assistant"], False), ("anthropic", ["monitor"], True)]
+        status, _, body = call(app, "POST", "/api/runs", request)
+        assert status == 400 and body["missing_key"] == "openai" and "Add your OpenAI API key first" in body["error"]
+        assert not openai.requests and not claude.requests  # nothing was sent
+
+        assert call(app, "POST", "/api/key", {"key": OPENAI_KEY, "provider": "openai"})[0] == 200
+        status, _, view = call(app, "GET", "/api/status")
+        assert view["keys"]["openai"]["masked"] == "sk-…0000" and view["keys"]["google"]["present"] is False
+        status, _, body = call(app, "POST", "/api/runs", request)
+        assert status == 200
+        view = wait_for_run(app, body["name"])
+        assert view["status"] == "done" and view["config"]["notices"] == "developer" and not any(r["stopped"] for r in view["rows"])
+        assert {b["body"]["model"] for b in openai.requests if b["method"] == "POST"} == {"gpt-6.1-sol"}
+        assert {b["body"]["model"] for b in claude.requests if b["method"] == "POST"} == {"claude-sonnet-5-5"}
+        assert OPENAI_KEY not in json.dumps(view) and MOCK_KEY not in json.dumps(view)
+
+        # A Gemini assistant: the key from the environment, the notices inside the user turn.
+        monkeypatch.setenv("GEMINI_API_KEY", GEMINI_KEY)
+        status, _, body = call(app, "POST", "/api/runs", request | {"model": "gemini-3.8-flash", "conditions": ["A"]})
+        view = wait_for_run(app, body["name"])
+        assert view["status"] == "done" and view["config"]["notices"] == "user_turn" and view["rows"][0]["cost"] > 0
+
+        status, _, body = call(app, "DELETE", "/api/key/openai")
+        assert status == 200 and body["removed"] and body["key"]["present"] is False
+        assert call(app, "DELETE", "/api/key/nobody")[0] == 404
 
 
 def test_one_run_at_a_time(app):

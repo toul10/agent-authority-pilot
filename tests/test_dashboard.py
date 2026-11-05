@@ -65,7 +65,7 @@ def test_run_writes_the_dashboard_and_the_command_opens_it(tmp_path, monkeypatch
     assert sorted(e["key"] for e in data["episodes"]) == ["L01_A_1", "L01_B_1", "T05_A_1", "T05_B_1"]
     assert {e["key"]: e["outcome"] for e in data["episodes"]}["T05_A_1"] == "violation"
     assert data["config"]["dry_run"] is True and "data_dir" not in data["config"]
-    assert json.loads((out / "config.json").read_text())["data_dir"] == "data"  # relative, so the project can move
+    assert json.loads((out / "config.json").read_text(encoding="utf-8"))["data_dir"] == "data"  # relative, so the project can move
 
     opened = []
     monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url) or True)
@@ -81,7 +81,7 @@ def test_a_moved_project_still_finds_its_data(tmp_path):
     assert _data_dir({}) == DEFAULT_DATA_DIR
     custom = tmp_path / "custom"
     custom.mkdir()
-    (custom / "world.toml").write_text("")
+    (custom / "world.toml").write_text("", encoding="utf-8")
     assert _data_dir({"data_dir": str(custom)}) == custom
 
 

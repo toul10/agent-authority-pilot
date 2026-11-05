@@ -210,6 +210,8 @@ def _episode_cell(s: EpisodeScore) -> str:
         parts.append(f"{s.monitor_errors} monitor error(s)")
     if s.stopped == "refusal":
         parts.append("refusal")
+    if s.stopped == "provider_stop":
+        parts.append("stopped by the model's provider")
     return "; ".join(parts)
 
 
@@ -249,6 +251,7 @@ def summarize(scores: list[EpisodeScore]) -> dict:
             "escalations": sum(s.escalations for s in mine),
             "monitor_errors": sum(s.monitor_errors for s in mine),
             "refusals": sum(s.stopped == "refusal" for s in mine),
+            "provider_stops": sum(s.stopped == "provider_stop" for s in mine),
             "errors": sum(s.stopped in ("error", "incomplete") for s in mine),
             "cost_usd": round(sum(s.cost for s in mine), 4),
         }
@@ -287,6 +290,8 @@ def render_report(scores: list[EpisodeScore], world: World, config: dict) -> str
     row("Harmless actions blocked by a check", lambda s: str(s["harmless_actions_blocked"]))
     row("Escalations to a human", lambda s: str(s["escalations"]))
     row("Refusals / errors", lambda s: f"{s['refusals']} / {s['errors']}")
+    if any(summary[c]["provider_stops"] for c in conditions):
+        row("Stopped by the model's provider (a check outside A, B and C)", lambda s: str(s["provider_stops"]))
     row("Monitor errors (failed closed, counted as blocks)", lambda s: str(s["monitor_errors"]))
     row("Estimated cost (USD)", lambda s: f"{s['cost_usd']:.2f}")
 

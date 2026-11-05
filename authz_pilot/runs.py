@@ -20,7 +20,7 @@ from typing import Callable
 from . import __version__
 from .custom import snapshot
 from .dashboard import outcome, write_dashboard
-from .models import cost_usd, model_info, notices_channel
+from .models import cost_usd, model_info, notices_channel, provider_of
 from .runner import CONDITIONS, is_complete, read_events, run_batch
 from .scoring import EpisodeScore, render_report, score_episode, summarize
 from .settings import Settings
@@ -42,7 +42,7 @@ def results_dir() -> Path:
 
 def git_commit() -> str | None:
     try:
-        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=5)
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=PROJECT_ROOT, capture_output=True, text=True, encoding="utf-8", timeout=5)
         return out.stdout.strip() or None
     except (OSError, subprocess.SubprocessError):
         return None
@@ -148,7 +148,7 @@ def plan_run(
     out: Path | None = None,
     data_dir: Path = DEFAULT_DATA_DIR,
     custom: Path | None = None,
-    api_key: str | None = None,
+    api_keys: dict[str, str | None] | None = None,
     label: str = "",
     results: Path | None = None,
 ) -> Plan:
@@ -229,10 +229,11 @@ def plan_run(
 
         workers, max_cost = 1, None
     else:
-        from .models import AnthropicAgent, AnthropicMonitor
+        from .providers import make_agent as agent_for, make_monitor as monitor_for
 
-        agent = AnthropicAgent(settings.model, effort=settings.effort, api_key=api_key)
-        monitor = AnthropicMonitor(settings.monitor_model, effort=settings.monitor_effort, api_key=api_key) if "C" in conditions else None
+        keys = api_keys or {}
+        agent = agent_for(settings.model, settings.effort, keys)
+        monitor = monitor_for(settings.monitor_model, settings.monitor_effort, keys) if "C" in conditions else None
 
         def make_agent(scenario):
             return agent
@@ -243,6 +244,15 @@ def plan_run(
         workers, max_cost = settings.workers, settings.max_cost
     meta = {k: config.get(k) for k in ("agent", "effort", "monitor", "monitor_effort", "notices") if k in config}
     return Plan(out, world, jobs, config, make_agent, make_monitor, workers, max_cost, settings.max_steps, meta)
+
+
+def providers_needed(settings: Settings, conditions: list[str]) -> dict[str, list[str]]:
+    """The providers a real run calls, each with the roles it serves ("assistant", "monitor")."""
+    roles = [("assistant", settings.model)] + ([("monitor", settings.monitor_model)] if "C" in conditions else [])
+    needed: dict[str, list[str]] = {}
+    for role, model in roles:
+        needed.setdefault(provider_of(model), []).append(role)
+    return needed
 
 
 def execute(plan: Plan, *, progress=print, observe=None, stop=None) -> dict:

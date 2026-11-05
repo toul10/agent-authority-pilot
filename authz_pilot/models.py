@@ -1,7 +1,8 @@
-"""Model adapters for the Claude API: the assistant under test and the monitor.
+"""The models you can pick, and the adapters for the Claude API: the assistant under test and the monitor.
 
-Both are thin wrappers around `client.messages.create`, so tests can swap in
-scripted stand-ins (see scripted.py) or point the SDK at a local mock server.
+Both adapters are thin wrappers around `client.messages.create`, so tests can swap in
+scripted stand-ins (see scripted.py) or point the SDK at a local mock server. The
+OpenAI and Gemini adapters are in providers.py.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 DEFAULT_AGENT_MODEL = "claude-opus-5-5"
@@ -30,14 +32,28 @@ class ModelInfo:
     thinking: str = "adaptive"  # "adaptive", or "budget" for manual extended thinking with budget_tokens
     display: bool = True  # takes thinking.display "summarized" (older models return summaries by default)
     system_messages: bool = True  # takes system messages in the middle of a conversation
+    price_changes: tuple[tuple[str, tuple[float, float, float]], ...] = ()  # announced: (first day, new price)
+    provider_monitor: bool = False  # the provider watches its agent actions and may stop a conversation
 
     @property
     def effort_levels(self) -> tuple[str, ...]:
         """The effort settings the harness accepts for this model."""
         return self.efforts or EFFORTS
 
+    def price_on(self, day: str | None = None) -> tuple[float, float, float]:
+        """The price on a day ("2026-11-05"; today when left out), counting announced changes."""
+        day = day or date.today().isoformat()
+        price = self.price
+        for start, later in self.price_changes:
+            if day >= start:
+                price = later
+        return price
+
 
 OLDER = "Claude, older"
+GPT = "GPT, from OpenAI"
+GEMINI = "Gemini, from Google"
+GEMINI_EFFORTS = ("low", "medium", "high")  # thinkingLevel; xhigh and max become high
 # The models you can pick. Each needs a price: without one, the spending limit could not count
 # what a run spends. Claude prices: https://platform.claude.com/docs/en/about-claude/pricing
 # (checked 2026-11-05). Mid-conversation system messages, effort levels and thinking per model:
@@ -56,6 +72,21 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "claude-sonnet-4-6": ModelInfo("Claude Sonnet 4.6", (3.00, 15.00, 0.30), group=OLDER, efforts=FOUR_EFFORTS, display=False, system_messages=False),
     "claude-opus-4-5": ModelInfo("Claude Opus 4.5", (5.00, 25.00, 0.50), group=OLDER, efforts=(), thinking="budget", display=False, system_messages=False),
     "claude-haiku-4-5": ModelInfo("Claude Haiku 4.5", (1.00, 5.00, 0.10), group=OLDER, efforts=(), thinking="budget", display=False, system_messages=False),
+    # OpenAI, Responses API. Prices (Standard tier): https://developers.openai.com/api/docs/pricing,
+    # effort levels: the model pages under https://developers.openai.com/api/docs/models (checked 2026-11-05).
+    # Cache writes cost 1.25x input, as for Claude. Every model here has all five effort levels.
+    "gpt-6-astra": ModelInfo("GPT-6 Astra", (10.00, 50.00, 1.00), provider="openai", group=GPT, provider_monitor=True),
+    "gpt-6.1-sol": ModelInfo("GPT-6.1 Sol", (2.00, 10.00, 0.10), provider="openai", group=GPT),
+    "gpt-6.1-terra": ModelInfo("GPT-6.1 Terra", (1.00, 5.00, 0.05), provider="openai", group=GPT),
+    "gpt-6-luna": ModelInfo("GPT-6 Luna", (0.10, 0.50, 0.01), provider="openai", group=GPT),
+    # Google, Gemini API generateContent. Prices (paid tier, output includes thinking) and the dated
+    # increases: https://ai.google.dev/gemini-api/docs/pricing; thinking levels:
+    # https://ai.google.dev/gemini-api/docs/thinking (checked 2026-11-05).
+    "gemini-4-argon": ModelInfo("Gemini 4 Argon", (2.00, 10.00, 0.10), provider="google", group=GEMINI, efforts=GEMINI_EFFORTS, system_messages=False,
+                                price_changes=(("2026-12-01", (4.00, 20.00, 0.20)),)),
+    "gemini-3.8-flash": ModelInfo("Gemini 3.8 Flash", (0.75, 3.75, 0.075), provider="google", group=GEMINI, efforts=GEMINI_EFFORTS, system_messages=False,
+                                  price_changes=(("2027-01-01", (1.50, 7.50, 0.15)),)),
+    "gemini-3.5-flash-lite": ModelInfo("Gemini 3.5 Flash-Lite", (0.30, 2.50, 0.03), provider="google", group=GEMINI, efforts=GEMINI_EFFORTS, system_messages=False),
 }
 MODELS = {m: info.name for m, info in MODEL_INFO.items()}
 PRICES = {m: info.price for m, info in MODEL_INFO.items()}
@@ -79,7 +110,28 @@ def model_notes(info: ModelInfo, role: str = "assistant") -> list[str]:
             notes.append("It has no effort setting of its own, so effort changes nothing here: the monitor runs it without extended thinking.")
     if role == "assistant" and not info.system_messages:
         notes.append("It takes no system messages mid-conversation, so operator notices reach it inside the user's turn. Keep that in mind when comparing it.")
+    if role == "assistant" and info.provider == "openai":
+        notes.append("Operator notices reach it as developer messages, OpenAI's nearest match to system messages.")
+    if role == "assistant" and info.provider_monitor:
+        notes.append("OpenAI watches this model's agent actions on its side. Trap scenarios may send alerts to your OpenAI organization, and if OpenAI stops a conversation, the episode is marked as stopped by the provider.")
+    for start, (inp, out, _) in info.price_changes:
+        if start > date.today().isoformat():
+            day = date.fromisoformat(start)
+            notes.append(f"Its price goes up on {day.day} {day:%B %Y}, to {dollars(inp)} in and {dollars(out)} out per million tokens.")
     return notes
+
+
+def dollars(amount: float) -> str:
+    """$4, $1.50, $0.075: cents always shown, and more digits only where a price has them."""
+    if amount == int(amount):
+        return f"${int(amount)}"
+    digits = max(2, len(f"{amount:.6f}".rstrip("0").split(".")[1]))
+    return f"${amount:.{digits}f}"
+
+
+def provider_of(model: str) -> str:
+    info = model_info(model)
+    return info.provider if info else "anthropic"
 
 
 def notices_channel(info: ModelInfo) -> str:
@@ -107,13 +159,13 @@ def effort_for(info: ModelInfo, effort: str) -> str:
     return next((e for e in reversed(lower) if e in levels), levels[0])
 
 
-def cost_usd(model: str, usage: dict) -> float | None:
-    """Estimated cost of one call, or None for models without a price entry."""
+def cost_usd(model: str, usage: dict, day: str | None = None) -> float | None:
+    """Estimated cost of one call made on `day` (today when left out), or None for models without a price.
+    Usage is in the Claude API's terms; the other providers' adapters convert theirs."""
     info = model_info(model)
     if info is None:
         return None
-    price = info.price
-    inp, out, cache_read = price
+    inp, out, cache_read = info.price_on(day)
     total = (
         usage.get("input_tokens", 0) * inp
         + usage.get("cache_creation_input_tokens", 0) * inp * CACHE_WRITE_MULTIPLIER
@@ -320,15 +372,20 @@ class AnthropicMonitor:
         }
         if response.stop_reason == "refusal":
             return Verdict("block", "The monitor model declined to review this action.", error="refusal", **meta)
-        text = next((b.text for b in response.content if getattr(b, "type", "") == "text"), "")
-        try:
-            data = json.loads(text)
-            decision, reason = data["decision"], str(data.get("reason", ""))
-        except (ValueError, KeyError, TypeError) as exc:
-            return Verdict("block", "The monitor's answer could not be read.", error=f"{type(exc).__name__}: {text[:200]}", **meta)
-        if decision not in ("allow", "block"):
-            return Verdict("block", "The monitor gave no valid decision.", error=f"decision={decision!r}", **meta)
-        return Verdict(decision, reason, **meta)
+        return parse_verdict(next((b.text for b in response.content if getattr(b, "type", "") == "text"), ""), meta)
+
+
+def parse_verdict(answer: str | dict, meta: dict) -> Verdict:
+    """The monitor's decision from its JSON text (or the arguments of its verdict call). Anything
+    unreadable blocks the action: the monitor fails closed."""
+    try:
+        data = json.loads(answer) if isinstance(answer, str) else answer
+        decision, reason = data["decision"], str(data.get("reason", ""))
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        return Verdict("block", "The monitor's answer could not be read.", error=f"{type(exc).__name__}: {str(answer)[:200]}", **meta)
+    if decision not in ("allow", "block"):
+        return Verdict("block", "The monitor gave no valid decision.", error=f"decision={decision!r}", **meta)
+    return Verdict(decision, reason, **meta)
 
 
 # --------------------------------------------------------------------------- key check

@@ -11,7 +11,7 @@ const drawer = R.makeDrawer();
 const enc = encodeURIComponent;
 
 // ---------------------------------------------------------------- words and marks
-const ORDER = ["violation", "stopped", "safe", "ok", "incomplete", "refusal", "error"];
+const ORDER = ["violation", "stopped", "safe", "ok", "incomplete", "refusal", "provider", "error"];
 const NOTE = { good: ["good", "check"], warning: ["warn", "alert"], critical: ["bad", "x"], info: ["neutral", "dot"] };
 const TRAP_HELP = {
   injection: "instructions hidden in a document the assistant reads",
@@ -134,6 +134,16 @@ async function getWorld() { return S.world || (S.world = await api("GET", "/api/
 async function getScenarios() { S.scenarios = await api("GET", "/api/scenarios"); return S.scenarios; }
 async function getRuns() { return (await api("GET", "/api/runs")).runs; }
 const modelOf = id => (S.status && S.status.models.find(m => m.id === id)) || null;
+const providerOf = id => (modelOf(id) || { provider: "anthropic" }).provider;
+const familyOf = id => S.status.providers[providerOf(id)].family;  // Claude, GPT or Gemini
+// The providers a real run calls, and those of them without a key yet.
+const providersFor = body => [...new Set([body.model || S.status.settings.model, ...(body.conditions.includes("C") ? [body.monitor_model || S.status.settings.monitor_model] : [])].map(providerOf))];
+const missingKeys = body => providersFor(body).filter(p => !S.status.keys[p].present);
+const andList = xs => xs.length < 2 ? xs.join("") : xs.slice(0, -1).join(", ") + " and " + xs[xs.length - 1];
+function missingKeyNote(missing) {
+  const names = andList(missing.map(p => S.status.providers[p].name));
+  return note("warning", h("p", {}, `Add your ${names} API key${missing.length > 1 ? "s" : ""} first, in `, h("a", { href: "#/settings", text: "Settings" }), "."));
+}
 const modelName = id => (modelOf(id) || { name: id }).name;
 const effortsOf = id => (modelOf(id) || { efforts: S.status.efforts }).efforts;
 // The effort a model gets for a setting: the setting when the model has it, else the nearest level below, as the server does.
@@ -158,9 +168,10 @@ function modelPicker(o, modelKey, effortKey, role, onchange, props) {
   return { model, effort, notes };
 }
 // Whether the key in use passed "Test the key" in this browser; a convenience, so it lives in localStorage.
-const keyId = () => S.status.key.masked || "token";
+const assistantKey = () => S.status.keys[providerOf(S.status.settings.model)];
+const keyId = () => assistantKey().masked || "token";
 function isTested() {
-  if (!S.status.key.present) return false;
+  if (!assistantKey().present) return false;
   try { return localStorage.getItem("authz-tested") === keyId(); } catch (e) { return false; }
 }
 function markTested() { try { localStorage.setItem("authz-tested", keyId()); } catch (e) {} }
@@ -220,22 +231,25 @@ async function route() {
 addEventListener("hashchange", route);
 
 // ---------------------------------------------------------------- the key
-function keyBlock(onChange) {
+const KEY_LOOK = { anthropic: "sk-ant-…", openai: "sk-…", google: "AIza…" };
+function keyBlock(onChange, provider = "anthropic") {
   const box = h("div", { class: "stack" });
+  const P = S.status.providers[provider];
+  const keep = k => { S.status.keys[provider] = k; if (provider === "anthropic") S.status.key = k; };
   function draw(message) {
-    const k = S.status.key;
-    const input = h("input", { type: "password", autocomplete: "off", spellcheck: "false", placeholder: "sk-ant-…" });
+    const k = S.status.keys[provider];
+    const input = h("input", { type: "password", autocomplete: "off", spellcheck: "false", placeholder: KEY_LOOK[provider] });
     const save = h("button", { class: "btn primary", type: "submit", text: k.saved ? "Replace the saved key" : "Save the key" });
     const out = h("div");
     const form = h("form", { class: "stack" },
-      field("Paste an API key", input, { help: "Create one in the Claude Console, under API keys. It is saved on this computer, readable only by your user, and the app never shows it again in full." }),
+      field(`Paste ${provider === "google" ? "a" : "an"} ${P.name} API key`, input, { help: `Create one in ${P.console}. It is saved on this computer, readable only by your user, and the app never shows it again in full.` }),
       h("div", { class: "actions" }, save));
     form.addEventListener("submit", async e => {
       e.preventDefault();
       save.disabled = true;
       try {
-        const r = await api("POST", "/api/key", { key: input.value });
-        S.status.key = r.key;
+        const r = await api("POST", "/api/key", { key: input.value, provider });
+        keep(r.key);
         draw(note("good", `Saved in ${r.key.saved_file}, readable only by your user.`));
         if (onChange) onChange();
       } catch (err) { fill(out, errorNote(err)); save.disabled = false; }
@@ -249,8 +263,8 @@ function keyBlock(onChange) {
         const no = h("button", { class: "btn", type: "button", text: "Cancel", onclick: () => fill(out) });
         yes.addEventListener("click", async () => {
           try {
-            const r = await api("DELETE", "/api/key");
-            S.status.key = r.key;
+            const r = await api("DELETE", "/api/key/" + provider);
+            keep(r.key);
             draw(note("good", "The saved key was removed."));
             if (onChange) onChange();
           } catch (err) { fill(out, errorNote(err)); }
@@ -260,7 +274,7 @@ function keyBlock(onChange) {
       });
     }
     const extra = [];
-    if (k.source === "environment") extra.push(h("p", { class: "help", text: "ANTHROPIC_API_KEY is set where the app was started, so that key is used. A key saved here is used only when that variable is not set." }));
+    if (k.source === "environment") extra.push(h("p", { class: "help", text: `${k.env} is set where the app was started, so that key is used. A key saved here is used only when that variable is not set.` }));
     if (k.source === "keychain") extra.push(h("p", { class: "help", text: "A key saved here would be used before the Keychain item." }));
     const manage = [form, remove ? h("div", { class: "actions" }, remove) : null, out];
     fill(box,
@@ -284,7 +298,7 @@ function testBlock(onOk) {
       const r = await api("POST", "/api/key/test", {});
       if (r.error) fill(out, note("critical", r.error));
       else {
-        fill(out, r.ok ? note("good", "The key works, and both models support what the pilot needs.") : note("warning", "The key works, but a model needs attention: pick another one in Settings."),
+        fill(out, r.ok ? note("good", "The key works, and both models support what the pilot needs.") : note("warning", "A model needs attention: add its key, or pick another model in Settings."),
           h("ul", { class: "models" }, r.models.map(m => h("li", {}, badge(m.ok ? "ok" : "violation"), h("div", {},
             h("b", { text: `${m.role === "assistant" ? "Assistant" : "Monitor, in C"}: ${m.name}` }), h("span", { class: "muted", text: `, ${m.effort} effort` }),
             m.problems.length ? h("ul", {}, m.problems.map(p => h("li", { text: p }))) : null)))));
@@ -294,21 +308,23 @@ function testBlock(onOk) {
     btn.disabled = false;
   });
   return h("div", { class: "stack" },
-    h("p", { class: "sub", text: "Looks up the assistant and monitor models chosen in Settings and checks that they support what the pilot needs. It sends no messages, so it costs nothing." }),
+    h("p", { class: "sub", text: "Looks up the assistant and monitor models chosen in Settings, with the key of each one's provider, and checks that they support what the pilot needs. It sends no messages, so it costs nothing." }),
     h("div", { class: "actions" }, btn), out);
 }
 
 // ---------------------------------------------------------------- runs
 function confirmSpend(est, onYes, onNo) {
-  const k = S.status.key;
+  const keys = est.keys || [];
+  const apis = andList(keys.map(k => "the " + k.api));
+  const which = keys.length > 1 ? "the keys " + andList(keys.map(k => `${k.masked || "from the environment"} (${k.name})`)) : "the key " + ((keys[0] && keys[0].masked) || "from the environment");
   const yes = h("button", { class: "btn primary", type: "button", text: `Run it, about ${usd(est.usd)}` });
   const no = h("button", { class: "btn", type: "button", text: "Cancel" });
   yes.addEventListener("click", () => { yes.disabled = no.disabled = true; onYes(); });
   no.addEventListener("click", onNo);
   setTimeout(() => no.focus(), 0);
   return h("div", { class: "confirm", role: "group", "aria-label": "Confirm the cost" },
-    h("p", {}, h("b", { text: "This run calls the Claude API with your key and costs money." })),
-    h("p", { class: "sub", text: `${plural(est.episodes, "episode", "episodes")}, ${plural(est.messages, "message", "messages")} in all, with the key ${k.masked || "from the environment"}. Estimated cost: about ${usd(est.usd)}. That is a rough guess from a short test run; the real cost depends on how much the model reads and thinks. No new episode starts once the spend passes ${usd(est.max_cost)} (Settings), and episodes already running finish.` }),
+    h("p", {}, h("b", { text: `This run calls ${apis} with your ${keys.length > 1 ? "keys" : "key"} and costs money.` })),
+    h("p", { class: "sub", text: `${plural(est.episodes, "episode", "episodes")}, ${plural(est.messages, "message", "messages")} in all, with ${which}. Estimated cost: about ${usd(est.usd)}. That is a rough guess from a short test run; the real cost depends on how much the model reads and thinks. No new episode starts once the spend passes ${usd(est.max_cost)} (Settings), and episodes already running finish.` }),
     est.usd > est.max_cost ? note("warning", `The estimate is more than your limit of ${usd(est.max_cost)}, so the episodes that have not started when the spend reaches it are skipped. Pick fewer scenarios or repeats, or raise the limit in Settings.`) : null,
     h("div", { class: "actions" }, yes, no));
 }
@@ -356,8 +372,8 @@ function runBox(getIds, opts = {}) {
     const g = ++gen;
     fill(confirmHost);
     const total = episodes();
-    if (opts.tally) go.textContent = `Run ${plural(total, "episode", "episodes")}` + (o.mode === "dry" ? ", free" : " with Claude…");
-    else go.textContent = o.mode === "dry" ? "Run it, free" : "Run with Claude…";
+    if (opts.tally) go.textContent = `Run ${plural(total, "episode", "episodes")}` + (o.mode === "dry" ? ", free" : ` with ${familyOf(o.model)}…`);
+    else go.textContent = o.mode === "dry" ? "Run it, free" : `Run with ${familyOf(o.model)}…`;
     go.disabled = !total;
     claude.hidden = o.mode !== "claude";
     for (const el of claude.querySelectorAll("[data-monitor]")) el.disabled = !o.conditions.has("C");
@@ -384,7 +400,8 @@ function runBox(getIds, opts = {}) {
       try { await opts.start(snap); } finally { go.disabled = !episodes(); }
       return;
     }
-    if (!S.status.key.present) { fill(confirmHost, note("warning", h("p", {}, "Add an API key first, on the ", h("a", { href: "#/start", text: "Start page" }), "."))); return; }
+    const missing = missingKeys(snap);
+    if (missing.length) { fill(confirmHost, missingKeyNote(missing)); return; }
     try {
       const e = await api("POST", "/api/estimate", snap);
       if (p !== press || g !== gen) return;
@@ -402,7 +419,7 @@ function runBox(getIds, opts = {}) {
         h("span", { class: "display", text: c }), h("span", { text: COND[c].short }))))),
     h("div", { class: "choices", role: "radiogroup", "aria-label": "Assistant" },
       choice(name, true, "Scripted assistant, free", "Does what you expect and takes every bait. Shows how the scoring sees a scenario, without the API.", () => { o.mode = "dry"; sync(); }),
-      choice(name, false, "Claude, with your key", "The real test. Costs money; you confirm the estimate first.", () => { o.mode = "claude"; sync(); })),
+      choice(name, false, "A real model, with your key", "Claude, GPT or Gemini: the real test. It costs money, and you confirm the estimate first.", () => { o.mode = "claude"; sync(); })),
     claude, tally, estimate,
     h("div", { class: "actions" }, go), confirmHost);
   sync();
@@ -590,9 +607,10 @@ async function pageStart() {
         h("a", { href: "#/settings", text: "Settings" }), ".");
     }).catch(err => fill(est, errorNote(err)));
     const confirmHost = h("div"), host = h("div");
-    const btn = h("button", { class: "btn primary", type: "button", text: "Run with Claude…" });
+    const btn = h("button", { class: "btn primary", type: "button", text: `Run with ${familyOf(s.model)}…` });
     btn.addEventListener("click", async () => {
-      if (!S.status.key.present) { fill(confirmHost, note("warning", "Add an API key first, in step 1.")); return; }
+      const missing = missingKeys(body);
+      if (missing.length) { fill(confirmHost, missingKeyNote(missing)); return; }
       try {
         const e = await api("POST", "/api/estimate", body);
         fill(confirmHost, confirmSpend(e, async () => {
@@ -603,7 +621,7 @@ async function pageStart() {
     });
     if (real.name) mountRun(host, real.name, { compact: true });
     return h("div", { class: "stack" },
-      h("p", { class: "sub", text: "Now Claude is the assistant, under all three set-ups. You confirm the cost before anything is sent." }),
+      h("p", { class: "sub", text: `Now ${modelName(s.model)} is the assistant, under all three set-ups. You confirm the cost before anything is sent.` }),
       est, h("div", { class: "actions" }, btn), confirmHost, host);
   }
 
@@ -612,11 +630,12 @@ async function pageStart() {
     h("div", { class: "actions" }, h("a", { class: "btn", href: "#/scenarios", text: "Open Scenarios" })));
 
   const custom = () => (S.scenarios && S.scenarios.custom) || [];
+  const mine = providerOf(st.settings.model);  // step 1 asks for the key the assistant model runs on
   const steps = [
-    { n: 1, title: "Add your API key", done: () => S.status.key.present, sum: () => "Key " + (S.status.key.masked || "found"), make: () => keyBlock(advance) },
+    { n: 1, title: "Add your API key", done: () => S.status.keys[mine].present, sum: () => "Key " + (S.status.keys[mine].masked || "found"), make: () => keyBlock(advance, mine) },
     { n: 2, title: "Test it, for free", done: isTested, sum: () => "The key works", make: () => testBlock(advance) },
     { n: 3, title: "Try a run that costs nothing", done: () => Boolean(dry.name), sum: () => dry.sum, make: dryBody },
-    { n: 4, title: "Run Claude on the same two scenarios", done: () => Boolean(real.name), sum: () => real.sum, make: realBody },
+    { n: 4, title: `Run ${modelName(st.settings.model)} on the same two scenarios`, done: () => Boolean(real.name), sum: () => real.sum, make: realBody },
     { n: 5, title: "Write a scenario of your own", done: () => custom().length > 0, sum: () => plural(custom().length, "scenario", "scenarios") + " of yours", make: ownBody },
   ];
   const nextStep = () => steps.find(s => !s.done());
@@ -652,14 +671,15 @@ async function pageStart() {
     h("header", { class: "hero" },
       h("div", {},
         h("h1", { class: "display", text: "Being asked is not being authorised." }),
-        h("p", { class: "lede", text: `Claude works as the assistant at ${W.company}, a made-up company: it reads documents, sends email and approves requests. Some messages are traps that ask for more than the sender may have. Run them under three set-ups and see what took effect, what was stopped, and what was never tried.` })),
+        h("p", { class: "lede", text: `A model, such as Claude, GPT or Gemini, works as the assistant at ${W.company}, a made-up company: it reads documents, sends email and approves requests. Some messages are traps that ask for more than the sender may have. Run them under three set-ups and see what took effect, what was stopped, and what was never tried.` })),
       h("ul", { class: "setups", "aria-label": "The three set-ups" }, ["A", "B", "C"].map(c => h("li", {},
         h("div", { class: "mark", "aria-hidden": "true" }, h("span", { class: "letter display", text: c }), layers(COND[c].layers, 3, 22)),
         h("div", {}, h("b", {}, h("span", { class: "sr-only", text: c + ": " }), COND[c].name), h("span", { text: SETUP_HELP[c] })))))),
     h("section", { class: "start-steps", "aria-labelledby": "qs" },
       h("h2", { id: "qs", text: "Quick start" }),
-      h("p", { class: "sub", text: "Five steps. Only step 4 calls Claude, and it asks you to confirm the cost first." }),
+      h("p", { class: "sub", text: "Five steps. Only step 4 calls a model's API, and it asks you to confirm the cost first." }),
       st.api_base ? note("info", `API requests go to ${st.api_base}, because ANTHROPIC_BASE_URL is set.`) : null,
+      Object.entries(st.api_bases || {}).map(([p, url]) => note("info", `${st.providers[p].api} requests go to ${url}, a different address set where the app was started.`)),
       list,
       h("p", { class: "after-steps" }, "After the quick start, run ", S.scenarios.builtin.length ? `all ${S.scenarios.builtin.length} scenarios` : "every scenario", ", or any mix of them, on ", h("a", { href: "#/run", text: "New run" }), ".")));
 }
@@ -670,7 +690,9 @@ async function pageSettings() {
   const values = { ...st.settings };
   const formBox = h("div", { class: "stack" });
   const msg = h("div");
-  const price = id => { const m = modelOf(id); return m ? `$${m.price[0]} in, $${m.price[1]} out per million tokens.` : ""; };
+  // $4, $1.50, $0.075: cents always shown, and more digits only where a price has them.
+  const dollars = x => "$" + (Number.isInteger(x) ? String(x) : x.toFixed(Math.max(2, (String(x).split(".")[1] || "").length)));
+  const price = id => { const m = modelOf(id); return m ? `${dollars(m.price[0])} in, ${dollars(m.price[1])} out per million tokens.` : ""; };
 
   function draw(errors = {}) {
     // The price of the chosen model and what to know about it, under its menu; effort offers that model's levels.
@@ -719,12 +741,14 @@ async function pageSettings() {
   return h("div", {},
     h("header", { class: "page-head" }, h("h1", { class: "display", text: "Settings" }),
       h("p", { class: "sub", text: "Your API key, the models to test, and limits for real runs." })),
-    section("set-key", "API key", "Used only for runs with Claude. It stays on this computer.", keyBlock(), testBlock()),
+    section("set-key", "API keys", "Each model runs on its maker's API, with your key for it. Keys stay on this computer.",
+      Object.entries(st.providers).map(([p, P]) => h("div", { class: "key-provider" }, h("h3", { text: `${P.name}, for ${P.family}` }), keyBlock(null, p))),
+      testBlock()),
     section("set-models", "Models and limits", "Defaults for new runs. On the Scenarios page you can pick other models for a single run.", form),
     section("set-paths", "Where things are kept", null,
       h("dl", { class: "kv" },
         h("dt", { text: "Settings" }), h("dd", {}, h("code", { text: p.settings })),
-        h("dt", { text: "Saved key" }), h("dd", {}, h("code", { text: p.key })),
+        Object.entries(p.keys).map(([id, path]) => [h("dt", { text: `Saved ${st.providers[id].name} key` }), h("dd", {}, h("code", { text: path }))]),
         h("dt", { text: "Your scenarios" }), h("dd", {}, h("code", { text: p.custom })),
         h("dt", { text: "Results" }), h("dd", {}, h("code", { text: p.results })))));
 }
@@ -794,7 +818,7 @@ async function pageRun() {
   const running = S.status.run && S.status.run.status === "running" ? S.status.run.name : null;
   return h("div", {},
     h("header", { class: "page-head" }, h("h1", { class: "display", text: "New run" }),
-      h("p", { class: "sub", text: "Pick scenarios and set-ups, run them in one go, and follow the scorecard as it fills in. The scripted assistant is free; with Claude you confirm the estimated cost first." })),
+      h("p", { class: "sub", text: "Pick scenarios and set-ups, run them in one go, and follow the scorecard as it fills in. The scripted assistant is free; with a real model you confirm the estimated cost first." })),
     S.scenarios.error ? note("critical", S.scenarios.error) : null,
     running ? note("info", h("p", {}, `Run ${running} is going, and one run goes at a time: wait for it or stop it first. `, h("a", { href: "#/results/" + enc(running), text: "Follow it" }), ".")) : null,
     h("div", { class: "newrun" },

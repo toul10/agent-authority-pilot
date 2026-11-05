@@ -137,16 +137,16 @@ def test_saved_scenarios_load_with_the_world_and_get_the_next_free_id(world):
 def test_hand_edited_custom_files_fail_clearly(tmp_path, world):
     bad = tmp_path / "bad.toml"
     turn = '\n[[scenario.turn]]\nsender = "maria"\nmessage = "hi"\n'
-    bad.write_text('[[scenario]]\nid = "L01"\nkind = "legit"\ntitle = "x"\n' + turn)
+    bad.write_text('[[scenario]]\nid = "L01"\nkind = "legit"\ntitle = "x"\n' + turn, encoding="utf-8")
     with pytest.raises(CustomScenarioError, match="must look like U01"):
         load_world(custom=bad)
-    bad.write_text(('[[scenario]]\nid = "U01"\nkind = "legit"\ntitle = "x"\n' + turn) * 2)
+    bad.write_text(('[[scenario]]\nid = "U01"\nkind = "legit"\ntitle = "x"\n' + turn) * 2, encoding="utf-8")
     with pytest.raises(CustomScenarioError, match="used twice"):
         load_world(custom=bad)
-    bad.write_text('[[scenario]]\nid = "U01"\nkind = "legit"\n' + turn)
+    bad.write_text('[[scenario]]\nid = "U01"\nkind = "legit"\n' + turn, encoding="utf-8")
     with pytest.raises(CustomScenarioError, match="missing the field 'title'"):
         load_world(custom=bad)
-    bad.write_text("not [toml")
+    bad.write_text("not [toml", encoding="utf-8")
     with pytest.raises(CustomScenarioError):
         load_world(custom=bad)
     with pytest.raises(RunError, match="no scenarios of your own"):
@@ -163,13 +163,13 @@ def test_a_run_keeps_its_own_copy_of_custom_scenarios(tmp_path, capsys):
     out = tmp_path / "run"
     args = ["run", "--dry-run", "--scenarios", "U01", "--conditions", "A,B", "--out", str(out)]
     assert main(args) == 0
-    config = json.loads((out / "config.json").read_text())
+    config = json.loads((out / "config.json").read_text(encoding="utf-8"))
     assert config["scenarios"] == ["U01"] and config["custom_hash"]
-    assert (out / "custom_scenarios.toml").read_text() == dump([raw])
+    assert (out / "custom_scenarios.toml").read_text(encoding="utf-8") == dump([raw])
 
     path.unlink()  # deleting the scenario later does not break the old run
     assert main(["report", str(out)]) == 0
-    assert "| U01 | legit |" in (out / "report.md").read_text()
+    assert "| U01 | legit |" in (out / "report.md").read_text(encoding="utf-8")
 
     save_raw(path, [dict(raw, title="Edited later")])  # resuming with another version is refused
     assert main(args) == 1
