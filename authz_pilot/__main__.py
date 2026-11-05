@@ -1,5 +1,6 @@
-"""Command line: key, validate, run, report, dashboard, show.
+"""Command line: app, key, validate, run, report, dashboard, show.
 
+    python -m authz_pilot app              # the local web app: quick start, settings, your scenarios, results
     python -m authz_pilot key set          # paste your API key (hidden); key test checks it for free
     python -m authz_pilot validate
     python -m authz_pilot run --dry-run
@@ -227,9 +228,22 @@ def cmd_show(args) -> int:
     return 0
 
 
+def cmd_app(args) -> int:
+    from .app import serve
+
+    return serve(port=args.port, open_browser=not args.no_open, results=args.results, data_dir=Path(args.data))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m authz_pilot", description="Agent authority pilot")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    a = sub.add_parser("app", help="open the local web app: quick start, settings, your own scenarios and results")
+    a.add_argument("--port", type=int, default=8765)
+    a.add_argument("--no-open", action="store_true", help="start the server without opening a browser")
+    a.add_argument("--results", type=Path, help="where runs are saved (default: results/ in the project)")
+    a.add_argument("--data", default=str(DEFAULT_DATA_DIR))
+    a.set_defaults(func=cmd_app)
 
     k = sub.add_parser("key", help="save, check or remove your Anthropic API key")
     k.add_argument("action", choices=["set", "test", "status", "remove"], help="set: paste it (hidden); test: free check of the key and the models; status: where it comes from; remove: delete the saved key")

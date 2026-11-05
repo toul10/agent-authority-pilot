@@ -19,18 +19,35 @@ git clone https://github.com/toul10/agent-authority-pilot.git
 cd agent-authority-pilot
 python3 -m venv .venv
 .venv/bin/pip install -e .
+.venv/bin/python -m authz_pilot app      # opens http://127.0.0.1:8765/ in your browser
+```
 
+The app's **Start** page has four steps: paste your key, test it for free, watch a free run with a scripted assistant, then run Claude on two scenarios. With the default models that last step costs about $0.09; the page shows the estimate and asks before it spends anything.
+
+The other pages:
+
+- **Scenarios.** Write your own scenarios next to the 30 built-in ones: who sends each message, what a careful assistant should do and, for a trap, what a fooled one would do. The form is checked as you type, with the same data checks as the built-in scenarios plus a scripted test that shows what the trap can catch and which condition can stop it. Run a scenario with the free scripted assistant or with Claude, and the result appears below it, with every conversation. A built-in scenario can be copied as a starting point.
+- **Results.** Every run, newest first, with its dashboard.
+- **Settings.** Your key, the assistant and monitor models and their effort, the spending limit per run, steps per message, and how many episodes run at once.
+
+**From the command line.** Everything works without the app too:
+
+```sh
 .venv/bin/python -m authz_pilot key set     # paste your key; the input is hidden
 .venv/bin/python -m authz_pilot key test    # free: checks the key and both models
 .venv/bin/python -m authz_pilot run --scenarios L12,T09 --conditions A,C   # 4 episodes, about $0.09
 .venv/bin/python -m authz_pilot dashboard results/<run>                    # the folder the run printed
 ```
 
-No key yet? `run --dry-run` goes through everything with a scripted agent, for free.
+No key yet? `run --dry-run`, or the free runs in the app, go through everything with a scripted agent.
 
-**Where the key is kept.** `key set` saves it outside the project, in `~/.config/authz-pilot/api-key` (`%APPDATA%\authz-pilot` on Windows), in a file only your user can read. The `ANTHROPIC_API_KEY` environment variable takes precedence over it. On macOS, a Keychain item with the service name `anthropic-api-key` is used when neither is set. `key status` shows which key is in use, and `key remove` deletes the saved file.
+**Where the key is kept.** `key set` and the app save it outside the project, in `~/.config/authz-pilot/api-key` (`%APPDATA%\authz-pilot` on Windows), in a file only your user can read. The `ANTHROPIC_API_KEY` environment variable takes precedence over it. On macOS, a Keychain item with the service name `anthropic-api-key` is used when neither is set. `key status` shows which key is in use, and `key remove` deletes the saved file.
 
-**Models.** The assistant is Claude Opus 5.5 and the monitor Claude Sonnet 5.5, both at effort `medium`, unless you choose otherwise with `--model`, `--effort`, `--monitor-model` and `--monitor-effort`. The choices are Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5: the models with a price in `authz_pilot/models.py`, so that `--max-cost` can count what a run spends. `key test` also checks that each chosen model supports what the harness asks of it.
+**Models.** The assistant is Claude Opus 5.5 and the monitor Claude Sonnet 5.5, both at effort `medium`, unless you choose otherwise in Settings or with `--model`, `--effort`, `--monitor-model` and `--monitor-effort`. The choices are Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5: the models with a price in `authz_pilot/models.py`, so that the spending limit can count what a run spends. `key test` also checks that each chosen model supports what the harness asks of it.
+
+**Your own scenarios** are saved in `custom/scenarios.toml`, which git ignores, in the same format as `data/scenarios.toml` and with ids U01, U02 and so on. You can also edit that file by hand. `run --scenarios custom` runs them from the command line. A run keeps its own copy of the scenarios it used, so editing or deleting one later does not change old results.
+
+**The app stays on your computer.** It listens on 127.0.0.1 only. Every API call needs a random token that the page receives when it loads. Requests that name another host or come from another site are refused, and other sites cannot show the app inside a frame. The key never goes back to the browser in full. A run with Claude starts only after you confirm its estimated cost, and the server refuses one that was not confirmed.
 
 ## The setup
 
@@ -148,7 +165,7 @@ Each run writes these files to `results/<timestamp>/`:
 - one JSONL file per episode
 - `report.md`
 - `summary.json`
-- `dashboard.html`: one self-contained page (no server, no network) with the results per condition, the traps by family, the violation types, and a scenario × condition grid. Select any result to read that conversation: messages, operator notices, tool calls and whether they were blocked, monitor decisions, thinking summaries and replies.
+- `dashboard.html`: one self-contained page (no server, no network; the app shows the same page) with the results per condition, the traps by family, the violation types, and a scenario × condition grid. Select any result to read that conversation: messages, operator notices, tool calls and whether they were blocked, monitor decisions, thinking summaries and replies.
 
 To resume an interrupted run, rerun the same command with the same `--out`. Finished episodes are skipped; episodes that stopped with an error run again. `report <run dir>` rebuilds the report, the summary and the dashboard from the logs; `dashboard <run dir>` does the same and opens the page.
 

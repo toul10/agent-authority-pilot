@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field, replace
@@ -19,18 +20,24 @@ from typing import Callable
 from . import __version__
 from .custom import snapshot
 from .dashboard import write_dashboard
+from .models import cost_usd
 from .runner import CONDITIONS, is_complete, read_events, run_batch
 from .scoring import EpisodeScore, render_report, score_episode, summarize
 from .settings import Settings
 from .world import DEFAULT_DATA_DIR, PROJECT_ROOT, CustomScenarioError, World, custom_path, load_world, validate
 
-RESULTS_DIR = PROJECT_ROOT / "results"
 SNAPSHOT = "custom_scenarios.toml"
 RESUME_KEYS = ("agent", "effort", "monitor", "monitor_effort", "data_hash", "custom_hash", "max_steps")
 
 
 class RunError(Exception):
     """A run cannot start; the message says why."""
+
+
+def results_dir() -> Path:
+    """Where new runs go: results/ in the project, or AUTHZ_PILOT_RESULTS."""
+    override = os.environ.get("AUTHZ_PILOT_RESULTS")
+    return Path(override).expanduser() if override else PROJECT_ROOT / "results"
 
 
 def git_commit() -> str | None:
@@ -123,10 +130,10 @@ class Plan:
     meta: dict = field(default_factory=dict)
 
 
-def _new_folder(name: str) -> Path:
-    out, n = RESULTS_DIR / name, 2
+def _new_folder(results: Path, name: str) -> Path:
+    out, n = results / name, 2
     while out.exists():
-        out, n = RESULTS_DIR / f"{name}-{n}", n + 1
+        out, n = results / f"{name}-{n}", n + 1
     return out
 
 
@@ -143,6 +150,7 @@ def plan_run(
     custom: Path | None = None,
     api_key: str | None = None,
     label: str = "",
+    results: Path | None = None,
 ) -> Plan:
     """Check the inputs, create the run folder with its config, and build the agents.
 
@@ -192,7 +200,7 @@ def plan_run(
     if out is None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         suffix = re.sub(r"[^A-Za-z0-9-]", "", label)[:40]
-        out = _new_folder(stamp + ("-dry-run" if dry_run else "") + (f"-{suffix}" if suffix else ""))
+        out = _new_folder(results or results_dir(), stamp + ("-dry-run" if dry_run else "") + (f"-{suffix}" if suffix else ""))
     config_path = out / "config.json"
     if config_path.exists():
         old = json.loads(config_path.read_text(encoding="utf-8"))
@@ -235,8 +243,73 @@ def plan_run(
     return Plan(out, world, jobs, config, make_agent, make_monitor, workers, max_cost, settings.max_steps, meta)
 
 
-def execute(plan: Plan, *, progress=print, observe=None) -> dict:
+def execute(plan: Plan, *, progress=print, observe=None, stop=None) -> dict:
     """Run the plan's episodes, then write the report, summary and dashboard."""
-    state = run_batch(plan.world, plan.jobs, plan.make_agent, plan.make_monitor, plan.out, workers=plan.workers, max_cost=plan.max_cost, max_steps=plan.max_steps, meta=plan.meta, progress=progress, observe=observe)
+    state = run_batch(plan.world, plan.jobs, plan.make_agent, plan.make_monitor, plan.out, workers=plan.workers, max_cost=plan.max_cost, max_steps=plan.max_steps, meta=plan.meta, progress=progress, observe=observe, stop=stop)
     state["scores"] = write_report(plan.out, plan.world, plan.config)
     return state
+
+
+# --------------------------------------------------------------------------- cost estimate
+
+# Tokens per message, measured in a short test run (results/smoke-20261105: 4
+# episodes, 6 messages, Opus 5.5 assistant and Sonnet 5.5 monitor, both at
+# medium effort). Only a rough guide: real use depends on how much the model
+# reads and thinks, and higher effort usually means more output.
+AGENT_TOKENS_PER_MESSAGE = {"input_tokens": 6, "output_tokens": 234, "cache_creation_input_tokens": 1589, "cache_read_input_tokens": 3106}
+MONITOR_TOKENS_PER_MESSAGE = {"input_tokens": 2080, "output_tokens": 88}
+
+
+def estimate_cost(world: World, scenario_ids: list[str], conditions: list[str], model: str, monitor_model: str, repeats: int = 1) -> dict:
+    """A rough cost estimate for a real run, from the measured tokens per message."""
+    messages = sum(len(world.scenarios[s].turns) for s in scenario_ids) * repeats
+    agent = (cost_usd(model, AGENT_TOKENS_PER_MESSAGE) or 0.0) * messages * len(conditions)
+    monitor = (cost_usd(monitor_model, MONITOR_TOKENS_PER_MESSAGE) or 0.0) * messages if "C" in conditions else 0.0
+    return {"usd": round(agent + monitor, 4), "episodes": len(scenario_ids) * len(conditions) * repeats, "messages": messages * len(conditions)}
+
+
+# --------------------------------------------------------------------------- listing runs
+
+
+def jobs_of(config: dict) -> list[tuple[str, str, int]]:
+    return [(sid, c, r) for r in range(1, int(config.get("repeats") or 1) + 1) for sid in config.get("scenarios", []) for c in config.get("conditions", [])]
+
+
+def list_runs(results: Path) -> list[dict]:
+    """Every run folder under `results`, newest first, with a few numbers for a list view."""
+    runs = []
+    for config_path in results.glob("*/config.json"):
+        folder = config_path.parent
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        done = sum(1 for p in (folder / "episodes").glob("*.jsonl") if is_complete(p))
+        totals = {}
+        try:
+            conditions = json.loads((folder / "summary.json").read_text(encoding="utf-8"))["conditions"]
+            totals = {
+                "violations": sum(c["trap_episodes_violated"] + c["legit_with_violation"] for c in conditions.values()),
+                "cost": round(sum(c["cost_usd"] for c in conditions.values()), 4),
+            }
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        runs.append(
+            {
+                "name": folder.name,
+                "modified": config_path.stat().st_mtime,
+                "dry_run": bool(config.get("dry_run")),
+                "agent": config.get("agent"),
+                "effort": config.get("effort"),
+                "monitor": config.get("monitor"),
+                "conditions": config.get("conditions", []),
+                "scenarios": config.get("scenarios", []),
+                "episodes": len(jobs_of(config)),
+                "done": done,
+                **totals,
+            }
+        )
+    for run in runs:
+        newest = max((p.stat().st_mtime for p in (results / run["name"] / "episodes").glob("*.jsonl")), default=run["modified"])
+        run["modified"] = max(run["modified"], newest)
+    return sorted(runs, key=lambda r: r["modified"], reverse=True)

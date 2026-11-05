@@ -97,6 +97,27 @@ def save_raw(path: Path, raws: list[dict]) -> None:
     os.replace(tmp, path)
 
 
+def upsert(path: Path, raw: dict) -> None:
+    """Save one scenario: replace the one with the same id, or add it at the end."""
+    raws = load_raw(path)
+    for i, old in enumerate(raws):
+        if old.get("id") == raw["id"]:
+            raws[i] = raw
+            break
+    else:
+        raws.append(raw)
+    save_raw(path, raws)
+
+
+def remove(path: Path, sid: str) -> bool:
+    raws = load_raw(path)
+    kept = [r for r in raws if r.get("id") != sid]
+    if len(kept) == len(raws):
+        return False
+    save_raw(path, kept)
+    return True
+
+
 def snapshot(path: Path, ids: list[str]) -> str | None:
     """TOML with just these custom scenarios as they are now; each run keeps a copy."""
     wanted = set(ids)
@@ -219,6 +240,22 @@ def clean_form(form, sid: str) -> tuple[dict, list[str]]:
         documents.append(doc)
     if documents:
         raw["document"] = documents
+
+    # Text appended to a document the world already has, as the built-in injection traps do.
+    added = []
+    for i, x in enumerate(f.items(form.get("inject"), COUNTS["documents"], "Added text"), 1):
+        where = f"Added text {i}"
+        if not isinstance(x, dict):
+            f.problems.append(f"{where}: expected fields.")
+            continue
+        added.append(
+            {
+                "document": f.text(x.get("document"), LIMITS["id"], f"{where}, document", required=True),
+                "text": f.text(x.get("text"), LIMITS["message"], f"{where}, text", multiline=True, required=True),
+            }
+        )
+    if added:
+        raw["inject"] = added
 
     turns = []
     raw_turns = f.items(form.get("turn"), COUNTS["turns"], "Messages")

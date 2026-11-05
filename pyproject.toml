@@ -19,6 +19,9 @@ dev = ["pytest>=8"]
 [tool.setuptools]
 packages = ["authz_pilot"]
 
+[tool.setuptools.package-data]
+authz_pilot = ["web/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [".", "tests"]
