@@ -1,9 +1,10 @@
-"""Command line: validate, run, report, show.
+"""Command line: validate, run, report, dashboard, show.
 
     python -m authz_pilot validate
     python -m authz_pilot run --dry-run
     python -m authz_pilot run --scenarios L01,T09 --conditions A
     python -m authz_pilot report results/<run>
+    python -m authz_pilot dashboard results/<run>
     python -m authz_pilot show results/<run>/episodes/T09_A_1.jsonl
 """
 
@@ -14,11 +15,13 @@ import json
 import os
 import subprocess
 import sys
+import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__
 from .checks import scripted_checks
+from .dashboard import write_dashboard
 from .models import DEFAULT_AGENT_MODEL, DEFAULT_MONITOR_MODEL
 from .prompts import render_transcript
 from .runner import CONDITIONS, is_complete, read_events, run_batch
@@ -27,6 +30,35 @@ from .world import DEFAULT_DATA_DIR, load_world, validate
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _portable(path: Path) -> str:
+    """A data path as stored in config.json: relative to the project when inside it."""
+    path = path.resolve()
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _data_dir(config: dict) -> Path:
+    """The data a run used. If that folder is gone (the project moved), use the project's own."""
+    saved = config.get("data_dir")
+    if saved:
+        path = Path(saved)
+        if not path.is_absolute():
+            path = ROOT / path
+        if (path / "world.toml").is_file():
+            return path
+    return DEFAULT_DATA_DIR
+
+
+def _load_run(run_dir: Path) -> tuple[dict, object]:
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    world = load_world(_data_dir(config))
+    if config.get("data_hash") != world.data_hash:
+        print(f"Warning: the data files changed since this run (run {config.get('data_hash')}, now {world.data_hash}).")
+    return config, world
 
 
 def _git_commit() -> str | None:
@@ -75,10 +107,13 @@ def cmd_validate(args) -> int:
 
 
 def _write_report(run_dir: Path, world, config: dict) -> list:
+    """Score every finished episode; write report.md, summary.json and dashboard.html."""
     paths = sorted((run_dir / "episodes").glob("*.jsonl"))
-    scores = [score_episode(read_events(p), world) for p in paths if is_complete(p)]
+    items = [(score_episode(events, world), events) for events in (read_events(p) for p in paths if is_complete(p))]
+    scores = [s for s, _ in items]
     (run_dir / "report.md").write_text(render_report(scores, world, config), encoding="utf-8")
     (run_dir / "summary.json").write_text(json.dumps(summarize(scores) | {"config": config}, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_dashboard(run_dir, world, config, items)
     return scores
 
 
@@ -140,7 +175,7 @@ def cmd_run(args) -> int:
         "version": __version__,
         "git_commit": _git_commit(),
         "data_hash": world.data_hash,
-        "data_dir": str(Path(args.data).resolve()),
+        "data_dir": _portable(Path(args.data)),
         "conditions": conditions,
         "scenarios": scenario_ids,
         "repeats": args.repeats,
@@ -168,27 +203,33 @@ def cmd_run(args) -> int:
     if monitor_errors:
         print(f"Warning: the monitor failed {monitor_errors} time(s); those actions were blocked. Check the monitor_call events.")
     print(f"Report: {out / 'report.md'}")
+    print(f"Dashboard: {out / 'dashboard.html'}  (python -m authz_pilot dashboard {out})")
     return 0
 
 
 def cmd_report(args) -> int:
-    config = json.loads((args.run_dir / "config.json").read_text(encoding="utf-8"))
-    world = load_world(config.get("data_dir") or DEFAULT_DATA_DIR)
-    if config.get("data_hash") != world.data_hash:
-        print(f"Warning: the data files changed since this run (run {config.get('data_hash')}, now {world.data_hash}).")
+    config, world = _load_run(args.run_dir)
     scores = _write_report(args.run_dir, world, config)
     print((args.run_dir / "report.md").read_text(encoding="utf-8"))
     print(f"Scored {len(scores)} episodes.")
     return 0
 
 
+def cmd_dashboard(args) -> int:
+    config, world = _load_run(args.run_dir)
+    scores = _write_report(args.run_dir, world, config)
+    path = (args.run_dir / "dashboard.html").resolve()
+    print(f"Dashboard for {len(scores)} episodes: {path}")
+    if not args.no_open:
+        webbrowser.open(path.as_uri())
+    return 0
+
+
 def cmd_show(args) -> int:
     events = read_events(args.episode)
     config_path = args.episode.parent.parent / "config.json"
-    data_dir = DEFAULT_DATA_DIR
-    if config_path.exists():
-        data_dir = json.loads(config_path.read_text(encoding="utf-8")).get("data_dir") or DEFAULT_DATA_DIR
-    world = load_world(data_dir)
+    config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+    world = load_world(_data_dir(config))
     start = events[0]
     scenario = world.scenarios[start["scenario"]]
     print(f"# {scenario.id}: {scenario.title} (condition {start['condition']}, repeat {start.get('repeat', 1)})")
@@ -239,6 +280,11 @@ def main(argv: list[str] | None = None) -> int:
     rep = sub.add_parser("report", help="rebuild report.md and summary.json from a run directory")
     rep.add_argument("run_dir", type=Path)
     rep.set_defaults(func=cmd_report)
+
+    dash = sub.add_parser("dashboard", help="rebuild the report and open dashboard.html, a local page with charts and every conversation")
+    dash.add_argument("run_dir", type=Path)
+    dash.add_argument("--no-open", action="store_true", help="write the file without opening a browser")
+    dash.set_defaults(func=cmd_dashboard)
 
     show = sub.add_parser("show", help="print one episode as a readable transcript")
     show.add_argument("episode", type=Path)

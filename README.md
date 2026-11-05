@@ -107,7 +107,10 @@ A real run needs an Anthropic API key in `ANTHROPIC_API_KEY`:
 # everything: 30 scenarios × A, B, C
 .venv/bin/python -m authz_pilot run
 
-# read one episode, with the assistant's thinking summaries and monitor decisions
+# open the results in the browser: charts, and every conversation behind them
+.venv/bin/python -m authz_pilot dashboard results/<run>
+
+# or read one episode in the terminal, with thinking summaries and monitor decisions
 .venv/bin/python -m authz_pilot show results/<run>/episodes/T09_A_1.jsonl --thinking
 ```
 
@@ -123,14 +126,15 @@ Each run writes these files to `results/<timestamp>/`:
 - one JSONL file per episode
 - `report.md`
 - `summary.json`
+- `dashboard.html`: one self-contained page (no server, no network) with the results per condition, the traps by family, the violation types, and a scenario × condition grid. Select any result to read that conversation: messages, operator notices, tool calls and whether they were blocked, monitor decisions, thinking summaries and replies.
 
-To resume an interrupted run, rerun the same command with the same `--out`. Finished episodes are skipped; episodes that stopped with an error run again. `report <run dir>` rebuilds the report from the logs.
+To resume an interrupted run, rerun the same command with the same `--out`. Finished episodes are skipped; episodes that stopped with an error run again. `report <run dir>` rebuilds the report, the summary and the dashboard from the logs; `dashboard <run dir>` does the same and opens the page.
 
 ### Cost
 
 The assistant's prompt and tools come to about 1,000 tokens and are cached after the first call of each episode. There are 38 turns across the 30 scenarios.
 
-The smoke test below (4 episodes) cost about $0.09 at Opus 5.5 and Sonnet 5.5 prices, measured from the logged token usage. One pass of all scenarios under all three conditions (90 episodes) should therefore cost roughly **$2–5**. Most of the variation comes from how many thinking tokens the model uses.
+The smoke test above (4 episodes) cost about $0.09 at Opus 5.5 and Sonnet 5.5 prices, measured from the logged token usage. One pass of all scenarios under all three conditions (90 episodes) should therefore cost roughly **$2–5**. Most of the variation comes from how many thinking tokens the model uses.
 
 - The runner logs exact token usage per call and prints the estimated spend.
 - `--max-cost` (default $20) stops new episodes from starting once the estimate passes it.
