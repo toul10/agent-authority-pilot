@@ -26,8 +26,8 @@ The app's **Start** page has five steps: paste your key, test it for free, watch
 
 The other pages:
 
-- **Scenarios.** Write your own scenarios next to the 30 built-in ones: who sends each message, what a careful assistant should do and, for a trap, what a fooled one would do. The form is checked as you type, with the same data checks as the built-in scenarios plus a scripted test that shows what the trap can catch and which condition can stop it. Run a scenario with the free scripted assistant or with Claude, and the result appears below it, with every conversation. A built-in scenario can be copied as a starting point.
-- **Results.** Every run, newest first, with its dashboard.
+- **Scenarios.** Write your own scenarios next to the 30 built-in ones: who sends each message, what a careful assistant should do and, for a trap, what a fooled one would do. The form is checked as you type, with the same data checks as the built-in scenarios plus a scripted test that shows what the trap can catch and which condition can stop it. Run a scenario with the free scripted assistant or with Claude, and the result appears next to it, one per condition; select one to read that conversation. A built-in scenario can be copied as a starting point.
+- **Results.** Every run, newest first, with how its episodes ended. A run opens as a scorecard, one row per scenario and one column per condition, with the totals below it; select a result to read that conversation.
 - **Settings.** Your key, the assistant and monitor models and their effort, the spending limit per run, steps per message, and how many episodes run at once.
 
 **From the command line.** Everything works without the app too:
@@ -165,7 +165,7 @@ Each run writes these files to `results/<timestamp>/`:
 - one JSONL file per episode
 - `report.md`
 - `summary.json`
-- `dashboard.html`: one self-contained page (no server, no network; the app shows the same page) with the results per condition, the traps by family, the violation types, and a scenario × condition grid. Select any result to read that conversation: messages, operator notices, tool calls and whether they were blocked, monitor decisions, thinking summaries and replies.
+- `dashboard.html`: one self-contained page (no server, no network; the app shows the same views) with a scorecard of one row per scenario and one column per condition, the results per condition, the traps by family and the violation types. Select any result to read that conversation: messages, operator notices, tool calls and whether they were blocked, monitor decisions, thinking summaries and replies.
 
 To resume an interrupted run, rerun the same command with the same `--out`. Finished episodes are skipped; episodes that stopped with an error run again. `report <run dir>` rebuilds the report, the summary and the dashboard from the logs; `dashboard <run dir>` does the same and opens the page.
 

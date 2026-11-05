@@ -250,7 +250,8 @@ function board({ scenarios, conditions, onOpen }) {
   const tableHost = h("div");
   const el = h("div", { class: "board" }, h("div", { class: "board-tools" }, legendHost, filterRow), tableHost);
   function draw() {
-    if (groups.length > 1) {
+    // Filters help only when there is a lot to look at.
+    if (groups.length > 1 && scenarios.length > 6) {
       fill(filterRow, [["all", "All"], ...groups.map(g => [g.key, g.label])].map(([k, label]) => {
         const b = h("button", { class: "btn small", type: "button", "aria-pressed": String(k === filter), text: label });
         b.addEventListener("click", () => { filter = k; draw(); });
@@ -518,7 +519,7 @@ function episodeView(DATA, ep) {
       box.append(h("p", { class: "reason", text: "Error: " + e.error }));
     }
   }
-  const sub = `${s.id} under ${ep.condition}, ${condName(ep.condition).toLowerCase()}` + (ep.repeat > 1 ? `, repeat ${ep.repeat}` : "") + `. Cost ${usd(ep.cost, 3)}.`;
+  const sub = `${s.id} under ${ep.condition}, ${condName(ep.condition).toLowerCase()}` + (ep.repeat > 1 ? `, repeat ${ep.repeat}` : "") + "." + ((DATA.config || {}).dry_run ? "" : ` Cost ${usd(ep.cost, 3)}.`);
   return { title: s.title || s.id, sub, body };
 }
 
