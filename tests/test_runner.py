@@ -1,4 +1,4 @@
-from authz_pilot.runner import Episode, run_episode
+from authz_pilot.runner import Episode, episode_path, read_events, run_batch, run_episode
 from authz_pilot.scripted import PlannedAgent, ScriptedAgent, ScriptedMonitor, scripted_step, text_block, tool_block
 
 from helpers import check_message_rules
@@ -122,6 +122,22 @@ def test_agent_error_stops_the_episode(world):
     events = run_episode(world, world.scenarios["L01"], "A", agent)
     assert events[-1]["stopped"] == "error"
     assert any(e["event"] == "error" for e in events)
+
+
+def test_rerun_retries_errored_episodes_and_skips_finished_ones(world, tmp_path):
+    jobs = [("L01", "A", 1)]
+    quiet = {"workers": 1, "progress": lambda _: None}
+    path = episode_path(tmp_path, "L01", "A", 1)
+
+    state = run_batch(world, jobs, lambda sc: ScriptedAgent([]), lambda: None, tmp_path, **quiet)
+    assert state["ran"] == 1 and read_events(path)[-1]["stopped"] == "error"
+
+    state = run_batch(world, jobs, lambda sc: PlannedAgent(world, sc), lambda: None, tmp_path, **quiet)
+    assert state["ran"] == 1 and state["skipped"] == 0
+    assert read_events(path)[-1]["stopped"] is None
+
+    state = run_batch(world, jobs, lambda sc: PlannedAgent(world, sc), lambda: None, tmp_path, **quiet)
+    assert state["ran"] == 0 and state["skipped"] == 1
 
 
 def test_planned_agents_follow_the_message_rules(world):

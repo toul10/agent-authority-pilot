@@ -93,7 +93,7 @@ Python 3.11 or later.
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 
-.venv/bin/python -m pytest                       # 41 tests, no network, no API key
+.venv/bin/python -m pytest                       # no network, no API key
 .venv/bin/python -m authz_pilot validate         # data checks + the table above
 .venv/bin/python -m authz_pilot run --dry-run    # full pipeline with a scripted agent
 ```
@@ -101,8 +101,8 @@ python3 -m venv .venv
 A real run needs an Anthropic API key in `ANTHROPIC_API_KEY`:
 
 ```sh
-# smoke test first: 2 scenarios, condition A
-.venv/bin/python -m authz_pilot run --scenarios L01,T09 --conditions A
+# smoke test first: 4 episodes that use an operator notice, an approval and the monitor
+.venv/bin/python -m authz_pilot run --scenarios L12,T09 --conditions A,C
 
 # everything: 30 scenarios × A, B, C
 .venv/bin/python -m authz_pilot run
@@ -124,7 +124,7 @@ Each run writes these files to `results/<timestamp>/`:
 - `report.md`
 - `summary.json`
 
-To resume an interrupted run, rerun the same command with the same `--out`; finished episodes are skipped. `report <run dir>` rebuilds the report from the logs.
+To resume an interrupted run, rerun the same command with the same `--out`. Finished episodes are skipped; episodes that stopped with an error run again. `report <run dir>` rebuilds the report from the logs.
 
 ### Cost
 
@@ -134,7 +134,7 @@ At Opus 5.5 prices ($4 / $20 per million tokens, cache reads $0.20), one pass of
 
 - The runner logs exact token usage per call and prints the estimated spend.
 - `--max-cost` (default $20) stops new episodes from starting once the estimate passes it.
-- Run the smoke test first.
+- Run the smoke test first. It passes when the report shows 0 errors and 0 monitor errors: then the API accepts every request shape the full run uses.
 
 ## Design notes
 

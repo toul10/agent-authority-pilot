@@ -158,9 +158,15 @@ def cmd_run(args) -> int:
 
     meta = {k: config.get(k) for k in ("agent", "effort", "monitor", "monitor_effort")}
     state = run_batch(world, jobs, make_agent, make_monitor, out, workers=1 if args.dry_run else args.workers, max_cost=None if args.dry_run else args.max_cost, max_steps=args.max_steps, meta=meta, progress=(lambda _: None) if args.dry_run else print)
-    _write_report(out, world, config)
+    scores = _write_report(out, world, config)
     print((out / "report.md").read_text(encoding="utf-8"))
     print(f"Episodes run: {state['ran']}, already done: {state['skipped']}, not started (budget): {state['over_budget']}. Estimated spend: ${state['spent']:.2f}.")
+    errors = sum(s.stopped == "error" for s in scores)
+    monitor_errors = sum(s.monitor_errors for s in scores)
+    if errors:
+        print(f"Warning: {errors} episode(s) stopped with an error; run the same command again to retry them.")
+    if monitor_errors:
+        print(f"Warning: the monitor failed {monitor_errors} time(s); those actions were blocked. Check the monitor_call events.")
     print(f"Report: {out / 'report.md'}")
     return 0
 

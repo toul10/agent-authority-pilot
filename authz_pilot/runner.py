@@ -187,12 +187,17 @@ def is_complete(path: Path) -> bool:
     return bool(events) and events[-1]["event"] == "episode_end"
 
 
+def is_finished(path: Path) -> bool:
+    """Complete and not stopped by an error, so a rerun can skip it. Errors are retried."""
+    return is_complete(path) and read_events(path)[-1].get("stopped") != "error"
+
+
 def run_batch(world: World, jobs: list[tuple[str, str, int]], make_agent, make_monitor, out_dir: Path, *, workers: int = 4, max_cost: float | None = None, max_steps: int = 8, meta: dict | None = None, progress=print) -> dict:
     """Run (scenario id, condition, repeat) jobs; one JSONL file per episode.
 
     Finished episode files are skipped, so an interrupted run can be resumed by
-    running the same command again. No new episode starts once the estimated
-    spend passes `max_cost`.
+    running the same command again; episodes that stopped with an error run
+    again. No new episode starts once the estimated spend passes `max_cost`.
     """
     (out_dir / "episodes").mkdir(parents=True, exist_ok=True)
     lock = threading.Lock()
@@ -201,7 +206,7 @@ def run_batch(world: World, jobs: list[tuple[str, str, int]], make_agent, make_m
     def work(job: tuple[str, str, int]) -> None:
         scenario_id, condition, repeat = job
         path = episode_path(out_dir, scenario_id, condition, repeat)
-        if is_complete(path):
+        if is_finished(path):
             with lock:
                 state["skipped"] += 1
             return
