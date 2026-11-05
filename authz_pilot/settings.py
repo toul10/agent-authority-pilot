@@ -6,13 +6,15 @@ Where they live:
 - Windows: %APPDATA%\\authz-pilot
 - AUTHZ_PILOT_HOME overrides both.
 
-Which API key is used, in this order:
+Each provider has its own API key (Anthropic for Claude, OpenAI, Google for
+Gemini), found in this order:
 
-1. the ANTHROPIC_API_KEY environment variable;
+1. the environment variable: ANTHROPIC_API_KEY, OPENAI_API_KEY, or
+   GEMINI_API_KEY (GOOGLE_API_KEY also works);
 2. the key saved with `python -m authz_pilot key set` or on the app's Settings
    page, in a file that only your user can read;
-3. on macOS, the Keychain item with the service name "anthropic-api-key"
-   (AUTHZ_PILOT_KEYCHAIN=0 turns this off).
+3. on macOS, the Keychain item with the service name "anthropic-api-key",
+   "openai-api-key" or "gemini-api-key" (AUTHZ_PILOT_KEYCHAIN=0 turns this off).
 """
 
 from __future__ import annotations
@@ -24,9 +26,24 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .models import DEFAULT_AGENT_MODEL, DEFAULT_MONITOR_MODEL, EFFORTS, MODELS
+from .models import DEFAULT_AGENT_MODEL, DEFAULT_MONITOR_MODEL, EFFORTS, MODEL_INFO, MODELS
 
-KEYCHAIN_SERVICE = "anthropic-api-key"
+
+@dataclass(frozen=True)
+class Provider:
+    name: str  # as people know it
+    env: tuple[str, ...]  # environment variables, first match wins
+    keychain: str  # macOS Keychain service name
+    file: str  # file name of the saved key
+    console: str  # where people get a key
+
+
+PROVIDERS = {
+    "anthropic": Provider("Anthropic", ("ANTHROPIC_API_KEY",), "anthropic-api-key", "api-key", "the Claude Console"),
+    "openai": Provider("OpenAI", ("OPENAI_API_KEY",), "openai-api-key", "openai-api-key", "the OpenAI API dashboard"),
+    "google": Provider("Google", ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "gemini-api-key", "gemini-api-key", "Google AI Studio"),
+}
+KEYCHAIN_SERVICE = PROVIDERS["anthropic"].keychain
 LIMITS = {"max_cost": (0.01, 1000.0), "max_steps": (1, 20), "workers": (1, 16)}
 
 
@@ -41,8 +58,8 @@ def home() -> Path:
     return (Path(base) if base else Path.home() / ".config") / "authz-pilot"
 
 
-def key_path() -> Path:
-    return home() / "api-key"
+def key_path(provider: str = "anthropic") -> Path:
+    return home() / PROVIDERS[provider].file
 
 
 def settings_path() -> Path:
@@ -95,6 +112,12 @@ def parse_settings(raw: dict, base: Settings | None = None) -> tuple[Settings, d
                 continue
             value = number
         values[name] = value
+    # Each model takes only some effort levels.
+    for model_field, effort_field in (("model", "effort"), ("monitor_model", "monitor_effort")):
+        info = MODEL_INFO.get(values[model_field])
+        if info and values[effort_field] not in info.effort_levels and effort_field not in problems:
+            levels = list(info.effort_levels)
+            problems[effort_field] = f"{info.name} takes effort {', '.join(levels[:-1])} or {levels[-1]}."
     return Settings(**values), problems
 
 
@@ -117,21 +140,21 @@ def save_settings(settings: Settings) -> Path:
 # --------------------------------------------------------------------------- API key
 
 
-def key_problem(key: str) -> str | None:
+def key_problem(key: str, provider: str = "anthropic") -> str | None:
     if not key:
         return "Paste a key first."
     if not (20 <= len(key) <= 400) or not key.isascii() or not key.isprintable() or any(c.isspace() for c in key):
-        return "That does not look like an API key. Copy it again from the Claude Console."
+        return f"That does not look like an API key. Copy it again from {PROVIDERS[provider].console}."
     return None
 
 
-def save_key(key: str) -> Path:
+def save_key(key: str, provider: str = "anthropic") -> Path:
     """Write the key to a file only this user can read (0600 from the start)."""
     key = key.strip()
-    problem = key_problem(key)
+    problem = key_problem(key, provider)
     if problem:
         raise ValueError(problem)
-    path = key_path()
+    path = key_path(provider)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -143,53 +166,63 @@ def save_key(key: str) -> Path:
     return path
 
 
-def saved_key() -> str | None:
+def saved_key(provider: str = "anthropic") -> str | None:
     try:
-        key = key_path().read_text(encoding="ascii").strip()
+        key = key_path(provider).read_text(encoding="ascii").strip()
     except (OSError, UnicodeDecodeError):
         return None
     return key or None
 
 
-def remove_key() -> bool:
+def remove_key(provider: str = "anthropic") -> bool:
     try:
-        key_path().unlink()
+        key_path(provider).unlink()
     except FileNotFoundError:
         return False
     return True
 
 
-def keychain_key() -> str | None:
+def keychain_key(provider: str = "anthropic") -> str | None:
     if sys.platform != "darwin" or os.environ.get("AUTHZ_PILOT_KEYCHAIN", "1") == "0":
         return None
     try:
         out = subprocess.run(
-            ["/usr/bin/security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+            ["/usr/bin/security", "find-generic-password", "-s", PROVIDERS[provider].keychain, "-w"],
             capture_output=True, text=True, timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     key = out.stdout.strip()
-    return key if out.returncode == 0 and not key_problem(key) else None
+    return key if out.returncode == 0 and not key_problem(key, provider) else None
 
 
-def resolve_key() -> tuple[str | None, str]:
+def env_key(provider: str = "anthropic") -> tuple[str | None, str | None]:
+    for name in PROVIDERS[provider].env:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value, name
+    return None, None
+
+
+def resolve_key(provider: str = "anthropic") -> tuple[str | None, str]:
     """(key, source). Source is "environment", "saved", "keychain" or "none"."""
-    env = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    env, _ = env_key(provider)
     if env:
         return env, "environment"
     for source, find in (("saved", saved_key), ("keychain", keychain_key)):
-        key = find()
+        key = find(provider)
         if key:
             return key, source
     return None, "none"
 
 
-def describe_source(source: str) -> str:
+def describe_source(source: str, provider: str = "anthropic") -> str:
+    p = PROVIDERS[provider]
+    _, env_name = env_key(provider)
     return {
-        "environment": "the ANTHROPIC_API_KEY environment variable",
-        "saved": f"the saved key in {key_path()}",
-        "keychain": f'the macOS Keychain (service "{KEYCHAIN_SERVICE}")',
+        "environment": f"the {env_name or p.env[0]} environment variable",
+        "saved": f"the saved key in {key_path(provider)}",
+        "keychain": f'the macOS Keychain (service "{p.keychain}")',
         "none": "none found",
     }[source]
 
@@ -198,4 +231,5 @@ def mask(key: str | None) -> str:
     """Enough to recognise a key, never enough to use it."""
     if not key:
         return ""
-    return ("sk-ant-" if key.startswith("sk-ant-") else "") + "…" + key[-4:]
+    prefix = next((p for p in ("sk-ant-", "sk-proj-", "sk-", "AIza") if key.startswith(p)), "")
+    return prefix + "…" + key[-4:]

@@ -36,7 +36,7 @@ from urllib.parse import urlsplit
 from . import __version__
 from .custom import COUNTS, LIMITS, check_scenario, clean_form, dump, load_raw, next_id, remove, upsert
 from .dashboard import SHORT, build_payload, outcome, render_dashboard
-from .models import EFFORTS, MODELS, PRICES, check_models
+from .models import EFFORTS, MODEL_INFO, check_models, model_notes
 from .runner import CONDITIONS, episode_path, is_complete, read_events
 from .runs import RunError, estimate_cost, execute, jobs_of, list_runs, load_run, plan_run, results_dir
 from .scoring import score_episode
@@ -204,7 +204,7 @@ class App:
             "api_base": os.environ.get("ANTHROPIC_BASE_URL") or None,
             "settings": asdict(load_settings()),
             "limits": {k: list(v) for k, v in SETTING_LIMITS.items()},
-            "models": [{"id": m, "name": n, "price": list(PRICES[m])} for m, n in MODELS.items()],
+            "models": [{"id": m, "name": i.name, "price": list(i.price), "provider": i.provider, "group": i.group, "efforts": list(i.effort_levels), "notes": {r: model_notes(i, r) for r in ("assistant", "monitor")}} for m, i in MODEL_INFO.items()],
             "efforts": list(EFFORTS),
             "paths": {"settings": str(settings_path()), "key": str(key_path()), "custom": str(self.custom), "results": str(self.results)},
             "run": {"name": current.name, "status": current.status} if current else None,

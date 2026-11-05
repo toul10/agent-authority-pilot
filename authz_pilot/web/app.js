@@ -87,16 +87,30 @@ let uid = 0;
 function field(label, control, opts = {}) {
   const id = control.id || (control.id = "f" + ++uid);
   const kids = [h("label", { for: id }, label, opts.optional ? h("span", { class: "optional", text: " (optional)" }) : null), control];
-  if (opts.help) {
+  if (opts.help != null) {  // "" keeps an empty, hidden help line that setHelp can fill later
     const hid = id + "-help";
     control.setAttribute("aria-describedby", hid);
-    kids.push(h("p", { class: "help", id: hid, text: opts.help }));
+    kids.push(h("p", { class: "help", id: hid, text: opts.help, hidden: !opts.help }));
   }
   if (opts.error) kids.push(h("p", { class: "error-text", text: opts.error }));
   return h("div", { class: "field" + (opts.wide ? " wide" : "") + (opts.cls ? " " + opts.cls : "") }, kids);
 }
+function setHelp(fieldEl, text) {
+  const p = fieldEl.querySelector(".help");
+  p.textContent = text;
+  p.hidden = !text;
+}
+// Options are [value, label] or [value, label, group]; a run of options with the same group shares an <optgroup>.
 function selectEl(options, value, onchange, props) {
-  const el = h("select", props, options.map(([v, label]) => h("option", { value: v, text: label })));
+  const kids = [];
+  let box = null;
+  for (const [v, label, group] of options) {
+    const opt = h("option", { value: v, text: label });
+    if (!group) { kids.push(opt); box = null; continue; }
+    if (!box || box.label !== group) kids.push(box = h("optgroup", { label: group }));
+    box.append(opt);
+  }
+  const el = h("select", props, kids);
   const want = value == null ? "" : String(value);
   if (want && !options.some(([v]) => v === want)) el.append(h("option", { value: want, text: want }));
   el.value = want;
@@ -119,7 +133,30 @@ async function getStatus() {
 async function getWorld() { return S.world || (S.world = await api("GET", "/api/world")); }
 async function getScenarios() { S.scenarios = await api("GET", "/api/scenarios"); return S.scenarios; }
 async function getRuns() { return (await api("GET", "/api/runs")).runs; }
-const modelName = id => ((S.status && S.status.models.find(m => m.id === id)) || { name: id }).name;
+const modelOf = id => (S.status && S.status.models.find(m => m.id === id)) || null;
+const modelName = id => (modelOf(id) || { name: id }).name;
+const effortsOf = id => (modelOf(id) || { efforts: S.status.efforts }).efforts;
+// The effort a model gets for a setting: the setting when the model has it, else the nearest level below, as the server does.
+function effortFor(id, effort) {
+  const all = S.status.efforts, levels = effortsOf(id);
+  if (levels.includes(effort)) return effort;
+  const below = all.slice(0, Math.max(0, all.indexOf(effort))).filter(e => levels.includes(e));
+  return below.length ? below[below.length - 1] : levels[0];
+}
+// A model menu, grouped, and an effort menu with only that model's levels. o[modelKey] and o[effortKey]
+// hold the values; after a model change the effort picked last comes back when the new model has it.
+function modelPicker(o, modelKey, effortKey, role, onchange, props) {
+  let wanted = o[effortKey];
+  const effort = selectEl([], null, v => { wanted = o[effortKey] = v; onchange(); }, props);
+  function levels() {
+    fill(effort, effortsOf(o[modelKey]).map(e => h("option", { value: e, text: e })));
+    effort.value = o[effortKey] = effortFor(o[modelKey], wanted);
+  }
+  const model = selectEl(S.status.models.map(m => [m.id, m.name, m.group]), o[modelKey], v => { o[modelKey] = v; levels(); onchange(); }, props);
+  levels();
+  const notes = () => { const m = modelOf(o[modelKey]); return m ? m.notes[role].join(" ") : ""; };
+  return { model, effort, notes };
+}
 // Whether the key in use passed "Test the key" in this browser; a convenience, so it lives in localStorage.
 const keyId = () => S.status.key.masked || "token";
 function isTested() {
@@ -281,8 +318,6 @@ function confirmSpend(est, onYes, onNo) {
 function runBox(getIds, opts = {}) {
   const s = S.status.settings;
   const o = { conditions: new Set(["A", "B", "C"]), mode: "dry", model: s.model, effort: s.effort, monitor_model: s.monitor_model, monitor_effort: s.monitor_effort, repeats: 1 };
-  const modelOptions = S.status.models.map(m => [m.id, m.name]);
-  const effortOptions = S.status.efforts.map(e => [e, e]);
   const tally = opts.tally ? h("p", { class: "tally" }) : null;
   const estimate = h("p", { class: "estimate", hidden: true });
   const confirmHost = h("div");
@@ -329,11 +364,16 @@ function runBox(getIds, opts = {}) {
     if (tally) drawTally();
     refreshEstimate(g);
   }
-  const sel = (key, options, extra) => selectEl(options, o[key], v => { o[key] = v; sync(); }, extra);
+  const agentPick = modelPicker(o, "model", "effort", "assistant", () => sync());
+  const monitorPick = modelPicker(o, "monitor_model", "monitor_effort", "monitor", () => sync(), { "data-monitor": "" });
+  const agentField = field("Assistant model", agentPick.model, { help: agentPick.notes() });
+  const monitorField = field("Monitor model, in C", monitorPick.model, { help: monitorPick.notes() });
+  agentPick.model.addEventListener("change", () => setHelp(agentField, agentPick.notes()));
+  monitorPick.model.addEventListener("change", () => setHelp(monitorField, monitorPick.notes()));
   claude.append(
     h("div", { class: "fields" },
-      field("Assistant model", sel("model", modelOptions)), field("Effort", sel("effort", effortOptions)),
-      field("Monitor model, in C", sel("monitor_model", modelOptions, { "data-monitor": "" })), field("Monitor effort", sel("monitor_effort", effortOptions, { "data-monitor": "" })),
+      agentField, field("Effort", agentPick.effort),
+      monitorField, field("Monitor effort", monitorPick.effort),
       field("Repeats", h("input", { type: "number", min: "1", max: "10", step: "1", value: "1", oninput: e => { o.repeats = Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1)); sync(); } }), { help: "Models do not answer the same way every time; repeats show how stable a result is." })));
   go.addEventListener("click", async () => {
     fill(confirmHost);
@@ -388,10 +428,16 @@ function mountRun(host, name, opts) {
   fill(host, panel.el);
 }
 
+// How operator notices reached the assistant, when not as system messages; it matters when comparing models.
+const NOTICES = {
+  user_turn: "Operator notices went to the assistant inside the user's turn, not as system messages.",
+  developer: "Operator notices went to the assistant as developer messages.",
+};
 function whoText(cfg) {
   if (cfg.dry_run) return "A scripted assistant that does what you expect and takes every bait. Free, no API.";
   const monitor = cfg.monitor && (cfg.conditions || []).includes("C") ? `; monitor ${modelName(cfg.monitor)} at ${cfg.monitor_effort} effort` : "";
-  return `${modelName(cfg.agent)} at ${cfg.effort} effort${monitor}.`;
+  const notices = NOTICES[cfg.notices] ? " " + NOTICES[cfg.notices] : "";
+  return `${modelName(cfg.agent)} at ${cfg.effort} effort${monitor}.${notices}`;
 }
 
 // One run: its state, the scorecard (filled in live), and in the full view the totals.
@@ -624,27 +670,23 @@ async function pageSettings() {
   const values = { ...st.settings };
   const formBox = h("div", { class: "stack" });
   const msg = h("div");
-  const modelOptions = st.models.map(m => [m.id, m.name]);
-  const effortOptions = st.efforts.map(e => [e, e]);
-  const price = id => { const m = st.models.find(x => x.id === id); return m ? `$${m.price[0]} in, $${m.price[1]} out per million tokens.` : ""; };
+  const price = id => { const m = modelOf(id); return m ? `$${m.price[0]} in, $${m.price[1]} out per million tokens.` : ""; };
 
   function draw(errors = {}) {
-    const sel = (key, options) => selectEl(options, values[key], v => { values[key] = v; });
-    // The price of the chosen model, under its menu.
-    const modelField = (label, key, help) => {
-      const el = sel(key, modelOptions);
-      const f = field(label, el, { error: errors[key], help: `${price(values[key])} ${help}` });
-      el.addEventListener("change", () => { f.querySelector(".help").textContent = `${price(values[key])} ${help}`; });
-      return f;
+    // The price of the chosen model and what to know about it, under its menu; effort offers that model's levels.
+    const pair = (modelKey, effortKey, role, label, help, effortLabel, effortHelp) => {
+      const pick = modelPicker(values, modelKey, effortKey, role, () => {});
+      const text = () => [price(values[modelKey]), help, pick.notes()].filter(Boolean).join(" ");
+      const f = field(label, pick.model, { error: errors[modelKey], help: text() });
+      pick.model.addEventListener("change", () => setHelp(f, text()));
+      return [f, field(effortLabel, pick.effort, { error: errors[effortKey], help: effortHelp })];
     };
     const num = (key, step) => h("input", { type: "number", step, min: String(st.limits[key][0]), max: String(st.limits[key][1]), value: String(values[key]), oninput: e => { values[key] = e.target.value; } });
     const [cl, ch] = st.limits.max_cost, [sl, sh] = st.limits.max_steps, [wl, wh] = st.limits.workers;
     fill(formBox,
       h("div", { class: "fields pairs" },
-        modelField("Assistant model", "model", "The model being tested."),
-        field("Assistant effort", sel("effort", effortOptions), { error: errors.effort, help: "More effort means more thinking: often better, always slower and dearer." }),
-        modelField("Monitor model", "monitor_model", "Reviews each email, approval and reply in set-up C."),
-        field("Monitor effort", sel("monitor_effort", effortOptions), { error: errors.monitor_effort })),
+        pair("model", "effort", "assistant", "Assistant model", "The model being tested.", "Assistant effort", "More effort means more thinking: often better, always slower and dearer."),
+        pair("monitor_model", "monitor_effort", "monitor", "Monitor model", "Reviews each email, approval and reply in set-up C.", "Monitor effort")),
       h("div", { class: "fields" },
         field("Spending limit per run, $", num("max_cost", "0.01"), { error: errors.max_cost, help: `No new episode starts once the estimated spend passes this; episodes already running finish. ${cl}–${ch}.` }),
         field("Steps per message", num("max_steps", "1"), { error: errors.max_steps, help: `Model calls the assistant may make for one message. ${sl}–${sh}.` }),

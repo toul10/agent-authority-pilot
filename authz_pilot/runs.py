@@ -20,7 +20,7 @@ from typing import Callable
 from . import __version__
 from .custom import snapshot
 from .dashboard import outcome, write_dashboard
-from .models import cost_usd
+from .models import cost_usd, model_info, notices_channel
 from .runner import CONDITIONS, is_complete, read_events, run_batch
 from .scoring import EpisodeScore, render_report, score_episode, summarize
 from .settings import Settings
@@ -178,11 +178,13 @@ def plan_run(
         config = {"agent": f"scripted-{scripted_agent}", "monitor": "scripted (allows everything)", "dry_run": True}
     else:
         use_monitor = "C" in conditions
+        info = model_info(settings.model)
         config = {
             "agent": settings.model,
             "effort": settings.effort,
             "monitor": settings.monitor_model if use_monitor else None,
             "monitor_effort": settings.monitor_effort if use_monitor else None,
+            "notices": notices_channel(info) if info else None,  # how operator notices reach the assistant
             "dry_run": False,
         }
     config |= {
@@ -239,7 +241,7 @@ def plan_run(
             return monitor
 
         workers, max_cost = settings.workers, settings.max_cost
-    meta = {k: config.get(k) for k in ("agent", "effort", "monitor", "monitor_effort")}
+    meta = {k: config.get(k) for k in ("agent", "effort", "monitor", "monitor_effort", "notices") if k in config}
     return Plan(out, world, jobs, config, make_agent, make_monitor, workers, max_cost, settings.max_steps, meta)
 
 

@@ -96,6 +96,15 @@ def test_the_api_needs_the_token(app):
     assert call(app, "GET", "/api/nothing")[0] == 404
 
 
+def test_status_lists_the_models_with_groups_efforts_and_notes(app):
+    models = {m["id"]: m for m in call(app, "GET", "/api/status")[2]["models"]}
+    assert [m["group"] for m in models.values()][:5] == ["Claude", "Claude", "Claude", "Claude", "Claude, older"]
+    assert models["claude-opus-4-6"]["efforts"] == ["low", "medium", "high", "max"]
+    assert models["claude-opus-4-6"]["price"] == [5.0, 25.0, 0.5]
+    assert "thinking budget" in " ".join(models["claude-haiku-4-5"]["notes"]["assistant"])
+    assert models["claude-opus-5-5"]["notes"] == {"assistant": [], "monitor": []}
+
+
 def test_cross_site_and_odd_requests_are_refused(app):
     assert call(app, "POST", "/api/settings", {"max_steps": 6}, headers={"Origin": "http://evil.example"})[0] == 403
     assert call(app, "POST", "/api/settings", {"max_steps": 6}, headers={"Sec-Fetch-Site": "cross-site"})[0] == 403

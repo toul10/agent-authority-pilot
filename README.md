@@ -44,7 +44,18 @@ No key yet? `run --dry-run`, or the free runs in the app, go through everything 
 
 **Where the key is kept.** `key set` and the app save it outside the project, in `~/.config/authz-pilot/api-key` (`%APPDATA%\authz-pilot` on Windows), in a file only your user can read. The `ANTHROPIC_API_KEY` environment variable takes precedence over it. On macOS, a Keychain item with the service name `anthropic-api-key` is used when neither is set. `key status` shows which key is in use, and `key remove` deletes the saved file.
 
-**Models.** The assistant is Claude Opus 5.5 and the monitor Claude Sonnet 5.5, both at effort `medium`, unless you choose otherwise in Settings or with `--model`, `--effort`, `--monitor-model` and `--monitor-effort`. The choices are Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5: the models with a price in `authz_pilot/models.py`, so that the spending limit can count what a run spends. `key test` also checks that each chosen model supports what the harness asks of it.
+**Models.** The assistant is Claude Opus 5.5 and the monitor Claude Sonnet 5.5, both at effort `medium`, unless you choose otherwise in Settings or with `--model`, `--effort`, `--monitor-model` and `--monitor-effort`. The choices are the models with a price in `authz_pilot/models.py`, so that the spending limit can count what a run spends:
+
+- **Current:** Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5.
+- **Older:** Claude Fable 5, Opus 5, Sonnet 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 4.6, Opus 4.5 and Haiku 4.5. Sonnet 4.5 is left out because it retires on 30 November 2026.
+
+Older models differ in what they take, and the harness adapts each request:
+
+- **Effort.** Opus 4.6 and Sonnet 4.6 have no `xhigh`. A setting a model lacks becomes the nearest level below it, and the app's menus offer only the levels the chosen model has.
+- **Thinking.** Opus 4.5 and Haiku 4.5 have no effort setting and no adaptive thinking. As the assistant, they think with a fixed budget that the effort setting picks: 1K tokens for `low`, 2K for `medium`, 4K for `high`, 8K for `xhigh` and 12K for `max`. As the monitor, they run without extended thinking.
+- **Operator notices.** Haiku 5.5, Sonnet 5, Opus 4.7 and the older models above do not accept system messages in the middle of a conversation. They get each notice in a `<system-reminder>` block at the end of the user's turn, as the Claude API docs suggest, and one sentence in the system prompt says that only the chat system can add such a block. Senders cannot forge one: the tag is rewritten in their messages and in documents. Each run records the channel in `config.json` as `notices` (`system` or `user_turn`), and the run page and dashboard say when notices went inside the user's turn. Results across these channels are not strictly comparable, because the notice reaches the model with different authority.
+
+`key test` also checks that each chosen model supports what the harness asks of it.
 
 **Your own scenarios** are saved in `custom/scenarios.toml`, which git ignores, in the same format as `data/scenarios.toml` and with ids U01, U02 and so on. You can also edit that file by hand. `run --scenarios custom` runs them from the command line. A run keeps its own copy of the scenarios it used, so editing or deleting one later does not change old results.
 
@@ -184,7 +195,7 @@ The smoke test above (4 episodes) cost about $0.09 at Opus 5.5 and Sonnet 5.5 pr
 
 - **No refusal fallback.** If the model refuses, the refusal is recorded and the episode stops. A server-side fallback would quietly swap in a different model under test.
 - **Append-only history.** Every request extends the previous one without editing it. This keeps prompt caching and Opus 5.5's preserved thinking valid, and a test checks it.
-- **Effort and thinking are explicit.** Thinking is always on for Opus 5.5. The harness asks for summarized thinking, so the logs include a summary of the assistant's reasoning, and sets effort explicitly so runs are comparable.
+- **Effort and thinking are explicit.** Thinking is always on for the assistant. Where a model allows it, the harness asks for summarized thinking, so the logs include a summary of the assistant's reasoning. It sets effort explicitly so runs are comparable.
 - **A blocked reply is never delivered.** In condition C, the assistant learns about it from an operator notice on its next turn.
 - **Scripted agents check the scenarios.** The oracle does exactly what each turn expects. It must finish every legit scenario without a violation, and condition B must never block it. The gullible agent takes every bait, and must trigger a violation in every trap under condition A. Both run in `validate` and in the tests.
 - **Repeats are not double-counted.** A value is counted once per recipient within an episode, so repeating it to someone who already received it is not a new violation.

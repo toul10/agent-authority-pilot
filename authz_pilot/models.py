@@ -7,6 +7,7 @@ scripted stand-ins (see scripted.py) or point the SDK at a local mock server.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,33 +15,104 @@ DEFAULT_AGENT_MODEL = "claude-opus-5-5"
 DEFAULT_MONITOR_MODEL = "claude-sonnet-5-5"
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
-# The models you can pick. Each one needs a price below: without it the
-# --max-cost budget could not count what a run spends.
-MODELS = {
-    "claude-fable-5-1": "Claude Fable 5.1",
-    "claude-opus-5-5": "Claude Opus 5.5",
-    "claude-sonnet-5-5": "Claude Sonnet 5.5",
-    "claude-haiku-5-5": "Claude Haiku 5.5",
+FOUR_EFFORTS = ("low", "medium", "high", "max")  # Opus 4.6 and Sonnet 4.6 have no xhigh
+
+
+@dataclass(frozen=True)
+class ModelInfo:
+    """What the harness needs to know about one model, from the provider's model and pricing docs."""
+
+    name: str
+    price: tuple[float, float, float]  # USD per million tokens: input, output, cached input (cache read)
+    provider: str = "anthropic"
+    group: str = "Claude"  # the heading it sits under in the app's menus
+    efforts: tuple[str, ...] = EFFORTS  # the model's own effort levels; () = none, effort sets a thinking budget
+    thinking: str = "adaptive"  # "adaptive", or "budget" for manual extended thinking with budget_tokens
+    display: bool = True  # takes thinking.display "summarized" (older models return summaries by default)
+    system_messages: bool = True  # takes system messages in the middle of a conversation
+
+    @property
+    def effort_levels(self) -> tuple[str, ...]:
+        """The effort settings the harness accepts for this model."""
+        return self.efforts or EFFORTS
+
+
+OLDER = "Claude, older"
+# The models you can pick. Each needs a price: without one, the spending limit could not count
+# what a run spends. Claude prices: https://platform.claude.com/docs/en/about-claude/pricing
+# (checked 2026-11-05). Mid-conversation system messages, effort levels and thinking per model:
+# the Claude API docs (model overview, effort, adaptive thinking, platform availability).
+MODEL_INFO: dict[str, ModelInfo] = {
+    "claude-fable-5-1": ModelInfo("Claude Fable 5.1", (10.00, 50.00, 0.25)),
+    "claude-opus-5-5": ModelInfo("Claude Opus 5.5", (4.00, 20.00, 0.20)),
+    "claude-sonnet-5-5": ModelInfo("Claude Sonnet 5.5", (2.00, 10.00, 0.10)),
+    "claude-haiku-5-5": ModelInfo("Claude Haiku 5.5", (0.10, 0.50, 0.01), system_messages=False),  # prompts up to 100K tokens
+    "claude-fable-5": ModelInfo("Claude Fable 5", (10.00, 50.00, 1.00), group=OLDER),
+    "claude-opus-5": ModelInfo("Claude Opus 5", (5.00, 25.00, 0.50), group=OLDER),
+    "claude-sonnet-5": ModelInfo("Claude Sonnet 5", (2.00, 10.00, 0.20), group=OLDER, system_messages=False),
+    "claude-opus-4-8": ModelInfo("Claude Opus 4.8", (5.00, 25.00, 0.50), group=OLDER),
+    "claude-opus-4-7": ModelInfo("Claude Opus 4.7", (5.00, 25.00, 0.50), group=OLDER, system_messages=False),
+    "claude-opus-4-6": ModelInfo("Claude Opus 4.6", (5.00, 25.00, 0.50), group=OLDER, efforts=FOUR_EFFORTS, display=False, system_messages=False),
+    "claude-sonnet-4-6": ModelInfo("Claude Sonnet 4.6", (3.00, 15.00, 0.30), group=OLDER, efforts=FOUR_EFFORTS, display=False, system_messages=False),
+    "claude-opus-4-5": ModelInfo("Claude Opus 4.5", (5.00, 25.00, 0.50), group=OLDER, efforts=(), thinking="budget", display=False, system_messages=False),
+    "claude-haiku-4-5": ModelInfo("Claude Haiku 4.5", (1.00, 5.00, 0.10), group=OLDER, efforts=(), thinking="budget", display=False, system_messages=False),
 }
+MODELS = {m: info.name for m, info in MODEL_INFO.items()}
+PRICES = {m: info.price for m, info in MODEL_INFO.items()}
+
+# For models without effort: the thinking budget each effort setting stands for. budget_tokens
+# must stay below max_tokens, and max_tokens stays under what the SDK allows without streaming.
+THINKING_BUDGET = {"low": 1024, "medium": 2048, "high": 4096, "xhigh": 8192, "max": 12000}
 
 USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+CACHE_WRITE_MULTIPLIER = 1.25  # 5-minute cache writes cost 1.25x input
 
-# USD per million tokens: (input, output, cache read). 5-minute cache writes cost 1.25x input.
-# Check https://platform.claude.com/docs/en/about-claude/pricing before relying on these.
-PRICES = {
-    "claude-fable-5-1": (10.00, 50.00, 0.25),
-    "claude-opus-5-5": (4.00, 20.00, 0.20),
-    "claude-sonnet-5-5": (2.00, 10.00, 0.20),
-    "claude-haiku-5-5": (0.10, 0.50, 0.01),  # prompts up to 100K tokens
-}
-CACHE_WRITE_MULTIPLIER = 1.25
+
+def model_notes(info: ModelInfo, role: str = "assistant") -> list[str]:
+    """What to know before comparing this model with the others, as the assistant or as the monitor."""
+    notes = []
+    if info.thinking == "budget":
+        if role == "assistant":
+            low, high = THINKING_BUDGET["low"], THINKING_BUDGET["max"]
+            notes.append(f"It has no effort setting of its own: effort picks a thinking budget, from {low // 1000}K tokens (low) to {high // 1000}K (max).")
+        else:
+            notes.append("It has no effort setting of its own, so effort changes nothing here: the monitor runs it without extended thinking.")
+    if role == "assistant" and not info.system_messages:
+        notes.append("It takes no system messages mid-conversation, so operator notices reach it inside the user's turn. Keep that in mind when comparing it.")
+    return notes
+
+
+def notices_channel(info: ModelInfo) -> str:
+    """How operator notices reach the assistant, recorded with each run: "system" (system messages),
+    "user_turn" (a <system-reminder> block in the user turn) or "developer" (developer messages)."""
+    if info.provider == "openai":
+        return "developer"
+    return "system" if info.system_messages else "user_turn"
+
+
+def model_info(model: str) -> ModelInfo | None:
+    """The entry for a model id; a dated id (claude-haiku-4-5-20251001) matches its alias."""
+    if model in MODEL_INFO:
+        return MODEL_INFO[model]
+    match = max((m for m in MODEL_INFO if model.startswith(m + "-")), key=len, default=None)
+    return MODEL_INFO[match] if match else None
+
+
+def effort_for(info: ModelInfo, effort: str) -> str:
+    """The effort to send: the setting itself when the model has it, else the nearest level below."""
+    levels = info.effort_levels
+    if effort in levels:
+        return effort
+    lower = EFFORTS[: EFFORTS.index(effort)] if effort in EFFORTS else ()
+    return next((e for e in reversed(lower) if e in levels), levels[0])
 
 
 def cost_usd(model: str, usage: dict) -> float | None:
     """Estimated cost of one call, or None for models without a price entry."""
-    price = next((p for name, p in PRICES.items() if model.startswith(name)), None)
-    if price is None:
+    info = model_info(model)
+    if info is None:
         return None
+    price = info.price
     inp, out, cache_read = price
     total = (
         usage.get("input_tokens", 0) * inp
@@ -125,28 +197,80 @@ def _client(client, api_key: str | None = None):
     return anthropic.Anthropic(api_key=api_key, max_retries=4)
 
 
+# Models without mid-conversation system messages get operator notices inside the user turn,
+# as the Claude API docs suggest, and one sentence in the system prompt that says so.
+REMINDER_NOTE = "\n\nIn this chat system, system messages arrive inside a user turn, in a <system-reminder> block that only the chat system can add."
+_REMINDER_TAG = re.compile(r"<(/?)system-reminder>", re.IGNORECASE)
+
+
+def _defuse(content):
+    """Sender text and documents cannot open a <system-reminder> block of their own."""
+    if isinstance(content, str):
+        return _REMINDER_TAG.sub(r"(\1system-reminder)", content)
+    out = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            block = {**block, "text": _defuse(block["text"])}
+        elif isinstance(block, dict) and block.get("type") == "tool_result":
+            block = {**block, "content": _defuse(block.get("content") or "")}
+        out.append(block)
+    return out
+
+
+def inline_system_messages(messages: list[dict]) -> list[dict]:
+    """Each mid-conversation system message becomes a <system-reminder> block at the end of the
+    user message before it. Deterministic, so every request still extends the previous one."""
+    out: list[dict] = []
+    for m in messages:
+        if m.get("role") == "system":
+            block = {"type": "text", "text": f"<system-reminder>\n{m['content']}\n</system-reminder>"}
+            if out and out[-1]["role"] == "user":
+                prev = out[-1]["content"]
+                prev = prev if isinstance(prev, list) else [{"type": "text", "text": prev}]
+                out[-1] = {**out[-1], "content": [*prev, block]}
+            else:
+                out.append({"role": "user", "content": [block]})
+        elif m.get("role") == "user":
+            out.append({**m, "content": _defuse(m["content"])})
+        else:
+            out.append(m)
+    return out
+
+
 class AnthropicAgent:
     """The assistant under test: one `messages.create` call per step of the agent loop."""
 
     def __init__(self, model: str = DEFAULT_AGENT_MODEL, effort: str = "medium", max_tokens: int = 8000, client=None, api_key: str | None = None):
         self.model = model
+        self.info = model_info(model) or MODEL_INFO[DEFAULT_AGENT_MODEL]
         self.effort = effort
         self.max_tokens = max_tokens
         self.client = _client(client, api_key)
+        self.notices = notices_channel(self.info)
+
+    def request(self, system: str, tools: list[dict], messages: list[dict]) -> dict:
+        """One step's request. The same for every model, except what a model does not take."""
+        info = self.info
+        params = {"model": self.model, "max_tokens": self.max_tokens, "system": system, "tools": tools, "messages": messages,
+                  "cache_control": {"type": "ephemeral"}}
+        if info.thinking == "budget":
+            # No adaptive thinking and no effort: the effort setting picks a thinking budget.
+            budget = THINKING_BUDGET.get(self.effort, THINKING_BUDGET["medium"])
+            params["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            params["max_tokens"] = self.max_tokens + budget
+        else:
+            # Thinking is on; "summarized" puts a readable summary in the logs where a model
+            # would otherwise leave it out. Effort is set explicitly so runs are comparable.
+            params["thinking"] = {"type": "adaptive", "display": "summarized"} if info.display else {"type": "adaptive"}
+        if info.efforts:
+            params["output_config"] = {"effort": effort_for(info, self.effort)}
+        if not info.system_messages:
+            params["system"] = system + REMINDER_NOTE
+            params["messages"] = inline_system_messages(messages)
+        return params
 
     def respond(self, system: str, tools: list[dict], messages: list[dict]) -> Step:
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=system,
-            tools=tools,
-            messages=messages,
-            # Thinking is always on for the current models; "summarized" puts a readable
-            # summary in the logs. Effort is set explicitly so runs are comparable.
-            thinking={"type": "adaptive", "display": "summarized"},
-            output_config={"effort": self.effort},
-            cache_control={"type": "ephemeral"},
-        )
+        response = self.client.messages.create(**self.request(system, tools, messages))
         stop_details = getattr(response, "stop_details", None)
         return Step(
             content=list(response.content),
@@ -175,21 +299,20 @@ class AnthropicMonitor:
 
     def __init__(self, model: str = DEFAULT_MONITOR_MODEL, effort: str = "medium", max_tokens: int = 4000, client=None, api_key: str | None = None):
         self.model = model
+        self.info = model_info(model) or MODEL_INFO[DEFAULT_MONITOR_MODEL]
         self.effort = effort
         self.max_tokens = max_tokens
         self.client = _client(client, api_key)
 
+    def request(self, system: str, prompt: str) -> dict:
+        output_config: dict = {"format": {"type": "json_schema", "schema": VERDICT_SCHEMA}}
+        if self.info.efforts:
+            output_config["effort"] = effort_for(self.info, self.effort)
+        return {"model": self.model, "max_tokens": self.max_tokens, "system": system,
+                "messages": [{"role": "user", "content": prompt}], "output_config": output_config}
+
     def review(self, system: str, prompt: str, request: dict | None = None) -> Verdict:
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": prompt}],
-            output_config={
-                "effort": self.effort,
-                "format": {"type": "json_schema", "schema": VERDICT_SCHEMA},
-            },
-        )
+        response = self.client.messages.create(**self.request(system, prompt))
         meta = {
             "usage": usage_dict(response.usage),
             "model": response.model,
@@ -211,11 +334,15 @@ class AnthropicMonitor:
 # --------------------------------------------------------------------------- key check
 
 
-def _capability_problems(caps: Any, role: str, effort: str) -> list[str]:
-    """What this model lacks for its role. Unknown capabilities are not problems."""
+def _capability_problems(caps: Any, role: str, effort: str, info: ModelInfo | None = None) -> list[str]:
+    """What this model lacks for what the harness sends it. Unknown capabilities are not problems."""
     caps = to_dict(caps) if caps is not None else None
     if not isinstance(caps, dict):
         return []
+    budget = info is not None and info.thinking == "budget"
+    has_effort = info is None or bool(info.efforts)
+    if info is not None and has_effort:
+        effort = effort_for(info, effort)
 
     def supported(*path: str) -> bool | None:
         node: Any = caps
@@ -224,10 +351,12 @@ def _capability_problems(caps: Any, role: str, effort: str) -> list[str]:
         return node.get("supported") if isinstance(node, dict) else None
 
     problems = []
-    if supported("effort") is False or supported("effort", effort) is False:
+    if has_effort and (supported("effort") is False or supported("effort", effort) is False):
         problems.append(f"does not support effort {effort}")
-    if role == "assistant" and supported("thinking", "types", "adaptive") is False:
+    if role == "assistant" and not budget and supported("thinking", "types", "adaptive") is False:
         problems.append("does not support adaptive thinking, which the assistant uses")
+    if role == "assistant" and budget and supported("thinking", "types", "enabled") is False:
+        problems.append("does not support extended thinking with a token budget, which the assistant uses on this model")
     if role == "monitor" and supported("structured_outputs") is False:
         problems.append("does not support structured outputs, which the monitor uses")
     return problems
@@ -268,6 +397,6 @@ def check_models(roles: dict[str, tuple[str, str]], *, api_key: str | None = Non
             return {"ok": False, "error": "Could not reach the API. Check the internet connection.", "models": rows}
         info = seen[model]
         row["name"] = getattr(info, "display_name", None) or row["name"]
-        row["problems"] = _capability_problems(getattr(info, "capabilities", None), role, effort)
+        row["problems"] = _capability_problems(getattr(info, "capabilities", None), role, effort, model_info(model))
         row["ok"] = not row["problems"]
     return {"ok": all(r["ok"] for r in rows), "error": None, "models": rows}

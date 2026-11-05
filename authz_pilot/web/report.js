@@ -594,6 +594,7 @@ const drawer = makeDrawer();
 const meta = [
   cfg.dry_run ? "Scripted assistant, no API." : `Assistant ${cfg.agent || "unknown"}` + (cfg.effort ? ` at ${cfg.effort} effort.` : "."),
   cfg.monitor ? `Monitor ${cfg.monitor}` + (cfg.monitor_effort ? ` at ${cfg.monitor_effort} effort.` : ".") : null,
+  { user_turn: "Operator notices went to the assistant inside the user's turn, not as system messages.", developer: "Operator notices went to the assistant as developer messages." }[cfg.notices] || null,
   `Data ${DATA.data_hash}, page made ${DATA.generated}.`,
 ].filter(Boolean).join(" ");
 app.append(
