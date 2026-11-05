@@ -154,8 +154,8 @@ function setLive(name, running) {
 }
 
 // ---------------------------------------------------------------- router
-const PAGES = { start: pageStart, scenarios: pageScenarios, results: pageResults, settings: pageSettings };
-const TITLES = { start: "Start", scenarios: "Scenarios", results: "Results", settings: "Settings" };
+const PAGES = { start: pageStart, scenarios: pageScenarios, run: pageRun, results: pageResults, settings: pageSettings };
+const TITLES = { start: "Start", scenarios: "Scenarios", run: "New run", results: "Results", settings: "Settings" };
 const leaving = new Set();
 const onLeave = fn => leaving.add(fn);
 let current = null;
@@ -272,7 +272,101 @@ function confirmSpend(est, onYes, onNo) {
   return h("div", { class: "confirm", role: "group", "aria-label": "Confirm the cost" },
     h("p", {}, h("b", { text: "This run calls the Claude API with your key and costs money." })),
     h("p", { class: "sub", text: `${plural(est.episodes, "episode", "episodes")}, ${plural(est.messages, "message", "messages")} in all, with the key ${k.masked || "from the environment"}. Estimated cost: about ${usd(est.usd)}. That is a rough guess from a short test run; the real cost depends on how much the model reads and thinks. No new episode starts once the spend passes ${usd(est.max_cost)} (Settings), and episodes already running finish.` }),
+    est.usd > est.max_cost ? note("warning", `The estimate is more than your limit of ${usd(est.max_cost)}, so the episodes that have not started when the spend reaches it are skipped. Pick fewer scenarios or repeats, or raise the limit in Settings.`) : null,
     h("div", { class: "actions" }, yes, no));
+}
+
+// Set-ups, the assistant and the cost, for a run of getIds(). opts.start(body) starts the run;
+// opts.tally shows its size (scenarios × set-ups × repeats) and puts the episode count on the button.
+function runBox(getIds, opts = {}) {
+  const s = S.status.settings;
+  const o = { conditions: new Set(["A", "B", "C"]), mode: "dry", model: s.model, effort: s.effort, monitor_model: s.monitor_model, monitor_effort: s.monitor_effort, repeats: 1 };
+  const modelOptions = S.status.models.map(m => [m.id, m.name]);
+  const effortOptions = S.status.efforts.map(e => [e, e]);
+  const tally = opts.tally ? h("p", { class: "tally" }) : null;
+  const estimate = h("p", { class: "estimate", hidden: true });
+  const confirmHost = h("div");
+  const go = h("button", { class: "btn primary", type: "button" });
+  const claude = h("div", { class: "stack" });
+  const name = "mode-" + ++uid;
+  const conds = () => ["A", "B", "C"].filter(c => o.conditions.has(c));
+  const repeats = () => (o.mode === "claude" ? o.repeats : 1);  // the scripted assistant always answers the same way
+  const episodes = () => getIds().length * conds().length * repeats();
+  const body = () => ({ scenarios: getIds(), conditions: conds(), mode: o.mode, repeats: repeats(),
+    ...(o.mode === "claude" ? { model: o.model, effort: o.effort, monitor_model: o.monitor_model, monitor_effort: o.monitor_effort } : {}) });
+  // Every change bumps gen, so an answer that arrives for an older choice is dropped.
+  let gen = 0, press = 0;
+  const say = text => { estimate.textContent = text; estimate.hidden = !text; };
+  const estText = e => e.usd > e.max_cost
+    ? `About ${usd(e.usd)}, a rough estimate: more than your limit of ${usd(e.max_cost)}, so some episodes would be skipped.`
+    : (opts.tally ? `About ${usd(e.usd)}, a rough estimate.` : `${plural(e.episodes, "episode", "episodes")}, about ${usd(e.usd)} (a rough estimate).`) + ` No new episode starts after ${usd(e.max_cost)}.`;
+  async function refreshEstimate(g) {
+    if (o.mode !== "claude" || !episodes()) { say(""); return; }
+    try {
+      const e = await api("POST", "/api/estimate", body());
+      if (g === gen) say(estText(e));
+    } catch (err) { if (g === gen) say(err.message); }
+  }
+  // Spaces between the parts, so the sum also reads as one sentence ("30 scenarios × 3 set-ups = 90 episodes").
+  function drawTally() {
+    const term = (n, one, many) => h("span", { class: "term" }, h("b", { class: "display", text: String(n) }), " ", h("span", { text: n === 1 ? one : many }));
+    const op = t => h("span", { class: "op", text: t });
+    const n = getIds().length, c = conds().length, r = repeats();
+    const parts = [term(n, "scenario", "scenarios"), op("×"), term(c, "set-up", "set-ups")];
+    if (r > 1) parts.push(op("×"), term(r, "repeat", "repeats"));
+    parts.push(op("="), term(n * c * r, "episode", "episodes"));
+    fill(tally, parts.flatMap((x, i) => (i ? [" ", x] : [x])));
+  }
+  function sync() {
+    const g = ++gen;
+    fill(confirmHost);
+    const total = episodes();
+    if (opts.tally) go.textContent = `Run ${plural(total, "episode", "episodes")}` + (o.mode === "dry" ? ", free" : " with Claude…");
+    else go.textContent = o.mode === "dry" ? "Run it, free" : "Run with Claude…";
+    go.disabled = !total;
+    claude.hidden = o.mode !== "claude";
+    for (const el of claude.querySelectorAll("[data-monitor]")) el.disabled = !o.conditions.has("C");
+    if (tally) drawTally();
+    refreshEstimate(g);
+  }
+  const sel = (key, options, extra) => selectEl(options, o[key], v => { o[key] = v; sync(); }, extra);
+  claude.append(
+    h("div", { class: "fields" },
+      field("Assistant model", sel("model", modelOptions)), field("Effort", sel("effort", effortOptions)),
+      field("Monitor model, in C", sel("monitor_model", modelOptions, { "data-monitor": "" })), field("Monitor effort", sel("monitor_effort", effortOptions, { "data-monitor": "" })),
+      field("Repeats", h("input", { type: "number", min: "1", max: "10", step: "1", value: "1", oninput: e => { o.repeats = Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1)); sync(); } }), { help: "Models do not answer the same way every time; repeats show how stable a result is." })));
+  go.addEventListener("click", async () => {
+    fill(confirmHost);
+    const p = ++press, g = gen;
+    const snap = body();  // the confirmation and the run both use exactly what is on screen now
+    if (o.mode === "dry") {
+      go.disabled = true;
+      try { await opts.start(snap); } finally { go.disabled = !episodes(); }
+      return;
+    }
+    if (!S.status.key.present) { fill(confirmHost, note("warning", h("p", {}, "Add an API key first, on the ", h("a", { href: "#/start", text: "Start page" }), "."))); return; }
+    try {
+      const e = await api("POST", "/api/estimate", snap);
+      if (p !== press || g !== gen) return;
+      fill(confirmHost, confirmSpend(e, async () => {
+        if (g !== gen) return;
+        fill(confirmHost);
+        await opts.start({ ...snap, confirm_spend: true });
+      }, () => fill(confirmHost)));
+    } catch (err) { if (p === press && g === gen) fill(confirmHost, errorNote(err)); }
+  });
+  const box = h("div", { class: "stack" },
+    h("fieldset", {}, h("legend", { class: "flabel", text: "Set-ups" }),
+      h("div", { class: "toggles" }, ["A", "B", "C"].map(c => h("label", { class: "toggle", title: COND[c].name },
+        h("input", { type: "checkbox", checked: o.conditions.has(c), onchange: e => { if (e.target.checked) o.conditions.add(c); else o.conditions.delete(c); sync(); } }),
+        h("span", { class: "display", text: c }), h("span", { text: COND[c].short }))))),
+    h("div", { class: "choices", role: "radiogroup", "aria-label": "Assistant" },
+      choice(name, true, "Scripted assistant, free", "Does what you expect and takes every bait. Shows how the scoring sees a scenario, without the API.", () => { o.mode = "dry"; sync(); }),
+      choice(name, false, "Claude, with your key", "The real test. Costs money; you confirm the estimate first.", () => { o.mode = "claude"; sync(); })),
+    claude, tally, estimate,
+    h("div", { class: "actions" }, go), confirmHost);
+  sync();
+  return { el: box, refresh: sync };
 }
 
 async function startRun(body, host, opts) {
@@ -520,7 +614,8 @@ async function pageStart() {
       h("h2", { id: "qs", text: "Quick start" }),
       h("p", { class: "sub", text: "Five steps. Only step 4 calls Claude, and it asks you to confirm the cost first." }),
       st.api_base ? note("info", `API requests go to ${st.api_base}, because ANTHROPIC_BASE_URL is set.`) : null,
-      list));
+      list,
+      h("p", { class: "after-steps" }, "After the quick start, run ", S.scenarios.builtin.length ? `all ${S.scenarios.builtin.length} scenarios` : "every scenario", ", or any mix of them, on ", h("a", { href: "#/run", text: "New run" }), ".")));
 }
 
 // ---------------------------------------------------------------- Settings
@@ -592,6 +687,83 @@ async function pageSettings() {
         h("dt", { text: "Results" }), h("dd", {}, h("code", { text: p.results })))));
 }
 
+// ---------------------------------------------------------------- New run: many scenarios at once
+const PICK_KEY = "authz-run-pick";  // the scenarios picked last time; never the assistant, which always starts on the free one
+async function pageRun() {
+  await Promise.all([getStatus(), getWorld(), getScenarios()]);
+  const W = S.world, builtin = S.scenarios.builtin, custom = S.scenarios.custom;
+  const groups = [{ label: "Legit requests", items: builtin.filter(r => r.kind === "legit") },
+    ...W.trap_types.map(t => ({ label: `Traps: ${(FAMILY[t] || t).toLowerCase()}`, items: builtin.filter(r => r.kind !== "legit" && r.trap === t) }))];
+  const grouped = new Set(groups.flatMap(g => g.items.map(r => r.id)));
+  groups.push({ label: "Other built-in", items: builtin.filter(r => !grouped.has(r.id)) }, { label: "Yours", items: custom });
+  const shown = groups.filter(g => g.items.length);
+  const order = shown.flatMap(g => g.items.map(r => r.id));
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(PICK_KEY) || "null"); } catch (e) {}
+  const pick = new Set(Array.isArray(saved) ? saved.filter(id => order.includes(id)) : builtin.map(r => r.id));
+  const chosen = () => order.filter(id => pick.has(id));
+
+  const errHost = h("div");
+  const box = runBox(chosen, { tally: true, start: async body => {
+    fill(errHost);
+    try {
+      const r = await api("POST", "/api/runs", body);
+      location.hash = "#/results/" + enc(r.name);
+    } catch (err) { fill(errHost, errorNote(err)); }
+  } });
+
+  const rows = shown.map((g, i) => {
+    const cb = h("input", { type: "checkbox" });
+    const count = h("span", { class: "pick-count" });
+    const items = g.items.map(r => {
+      const c = h("input", { type: "checkbox", value: r.id });
+      c.addEventListener("change", () => { if (c.checked) pick.add(r.id); else pick.delete(r.id); update(); });
+      return { id: r.id, c, el: h("li", {}, h("label", { class: "pick-item" }, c, h("span", { class: "sid", text: r.id }), h("span", { class: "t", text: r.title || "(no title)" }))) };
+    });
+    const list = h("ul", { class: "pick-items", id: "pick-list-" + i, hidden: true }, items.map(x => x.el));
+    const more = h("button", { class: "pick-more", type: "button", "aria-expanded": "false", "aria-controls": list.id }, count, chevron());
+    more.addEventListener("click", () => { const show = list.hidden; list.hidden = !show; more.setAttribute("aria-expanded", String(show)); });
+    cb.addEventListener("change", () => { for (const x of items) { if (cb.checked) pick.add(x.id); else pick.delete(x.id); } update(); });
+    const el = h("li", { class: "pick-group" }, h("div", { class: "pick-row" }, h("label", { class: "pick-label" }, cb, h("span", { text: g.label })), more), list);
+    return { label: g.label, cb, count, more, items, el };
+  });
+  const all = h("input", { type: "checkbox" });
+  const allCount = h("span", { class: "pick-count" });
+  all.addEventListener("change", () => { if (all.checked) order.forEach(id => pick.add(id)); else pick.clear(); update(); });
+
+  function update(first) {
+    for (const row of rows) {
+      const n = row.items.filter(x => pick.has(x.id)).length, m = row.items.length;
+      row.cb.checked = n === m;
+      row.cb.indeterminate = n > 0 && n < m;
+      for (const x of row.items) x.c.checked = pick.has(x.id);
+      row.count.textContent = `${n} of ${m}`;
+      row.more.setAttribute("aria-label", `Show the scenarios in ${row.label}, ${n} of ${m} picked`);
+    }
+    all.checked = order.length > 0 && pick.size === order.length;
+    all.indeterminate = pick.size > 0 && pick.size < order.length;
+    allCount.textContent = `${pick.size} of ${order.length}`;
+    if (first) return;
+    try { localStorage.setItem(PICK_KEY, JSON.stringify(chosen())); } catch (e) {}
+    box.refresh();
+  }
+  update(true);
+
+  const running = S.status.run && S.status.run.status === "running" ? S.status.run.name : null;
+  return h("div", {},
+    h("header", { class: "page-head" }, h("h1", { class: "display", text: "New run" }),
+      h("p", { class: "sub", text: "Pick scenarios and set-ups, run them in one go, and follow the scorecard as it fills in. The scripted assistant is free; with Claude you confirm the estimated cost first." })),
+    S.scenarios.error ? note("critical", S.scenarios.error) : null,
+    running ? note("info", h("p", {}, `Run ${running} is going, and one run goes at a time: wait for it or stop it first. `, h("a", { href: "#/results/" + enc(running), text: "Follow it" }), ".")) : null,
+    h("div", { class: "newrun" },
+      h("section", { class: "pick", "aria-labelledby": "pick-h" },
+        h("h2", { id: "pick-h", text: "Scenarios" }),
+        h("div", { class: "pick-row pick-all" }, h("label", { class: "pick-label" }, all, h("span", { text: "All scenarios" })), allCount),
+        h("ul", { class: "pick-groups" }, rows.map(r => r.el))),
+      h("aside", { class: "side-block newrun-side", "aria-labelledby": "nr-h" },
+        h("h2", { id: "nr-h", text: "Run them" }), box.el, errHost)));
+}
+
 // ---------------------------------------------------------------- Results
 async function pageResults(parts) {
   await getStatus();
@@ -604,7 +776,7 @@ async function pageResults(parts) {
   const head = h("header", { class: "page-head" }, h("h1", { class: "display", text: "Results" }),
     h("p", { class: "sub", text: `Every run in ${S.status.paths.results}, newest first. Open one to read every conversation.` }));
   if (!runs.length) {
-    return h("div", {}, head, note("info", h("p", {}, "No runs yet. Start one from the ", h("a", { href: "#/start", text: "Start" }), " or the ", h("a", { href: "#/scenarios", text: "Scenarios" }), " page.")));
+    return h("div", {}, head, note("info", h("p", {}, "No runs yet. Start one from the ", h("a", { href: "#/start", text: "Start" }), " page, run many at once on ", h("a", { href: "#/run", text: "New run" }), ", or run one from ", h("a", { href: "#/scenarios", text: "Scenarios" }), ".")));
   }
   const live = S.status.run && S.status.run.status === "running" ? S.status.run.name : null;
   const body = runs.map(r => {
@@ -702,6 +874,7 @@ async function pageScenarios() {
     const custom = S.scenarios.custom;
     fill(listBox,
       h("button", { class: "btn primary", type: "button", text: "New scenario", onclick: () => open("new", null) }),
+      h("a", { class: "btn", href: "#/run", text: "Run several at once" }),
       h("h2", { text: "Yours" }),
       custom.length ? h("ul", { class: "slist" }, custom.map(r => item(r, "custom", true)))
         : h("p", { class: "help", text: "None yet. Start a new one, or open a built-in scenario and copy it." }),
@@ -1073,7 +1246,13 @@ async function pageScenarios() {
     runnableShown = runnable();
     const head = h("h2", { id: "run-h", text: runnableShown ? `Run ${ed.id}` : "Run it" });
     if (!runnableShown) fill(runBlock, head, h("p", { class: "sub", text: ed.mode === "new" ? "Save the scenario first; then run it here and see the result right away." : "Save your changes first: a run uses the saved version." }));
-    else fill(runBlock, head, runBox([ed.id]));
+    else {
+      const id = ed.id;
+      fill(runBlock, head, runBox(() => [id], { start: async body => {
+        const n = await startRun(body, runHost, { compact: true, mini: true, onReady: reveal });
+        if (n) S.lastRuns[id] = n;
+      } }).el);
+    }
     if (remount) {
       if (runHost._stop) runHost._stop();
       fill(runHost);
@@ -1085,75 +1264,6 @@ async function pageScenarios() {
   // Scrolls the side column and, if needed, the page, until the whole result is in view.
   function reveal(el) {
     el.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "nearest" });
-  }
-
-  function runBox(ids) {
-    const s = S.status.settings;
-    const o = { conditions: new Set(["A", "B", "C"]), mode: "dry", model: s.model, effort: s.effort, monitor_model: s.monitor_model, monitor_effort: s.monitor_effort, repeats: 1 };
-    const modelOptions = S.status.models.map(m => [m.id, m.name]);
-    const effortOptions = S.status.efforts.map(e => [e, e]);
-    const estimate = h("p", { class: "estimate" });
-    const confirmHost = h("div");
-    const go = h("button", { class: "btn primary", type: "button" });
-    const claude = h("div", { class: "stack" });
-    const name = "mode-" + ++uid;
-    const body = extra => ({ scenarios: ids, conditions: ["A", "B", "C"].filter(c => o.conditions.has(c)), mode: o.mode, repeats: o.repeats,
-      ...(o.mode === "claude" ? { model: o.model, effort: o.effort, monitor_model: o.monitor_model, monitor_effort: o.monitor_effort } : {}), ...extra });
-    let estSeq = 0;
-    async function refreshEstimate() {
-      if (o.mode !== "claude" || !o.conditions.size) { estimate.textContent = ""; return; }
-      const seq = ++estSeq;
-      try {
-        const e = await api("POST", "/api/estimate", body());
-        if (seq === estSeq) estimate.textContent = `${plural(e.episodes, "episode", "episodes")}, about ${usd(e.usd)} (a rough estimate). No new episode starts after ${usd(e.max_cost)}.`;
-      } catch (err) { if (seq === estSeq) estimate.textContent = err.message; }
-    }
-    function sync() {
-      fill(confirmHost);
-      go.textContent = o.mode === "dry" ? "Run it, free" : "Run with Claude…";
-      go.disabled = !o.conditions.size;
-      claude.hidden = o.mode !== "claude";
-      for (const el of claude.querySelectorAll("[data-monitor]")) el.disabled = !o.conditions.has("C");
-      refreshEstimate();
-    }
-    const sel = (key, options, extra) => selectEl(options, o[key], v => { o[key] = v; sync(); }, extra);
-    claude.append(
-      h("div", { class: "fields" },
-        field("Assistant model", sel("model", modelOptions)), field("Effort", sel("effort", effortOptions)),
-        field("Monitor model, in C", sel("monitor_model", modelOptions, { "data-monitor": "" })), field("Monitor effort", sel("monitor_effort", effortOptions, { "data-monitor": "" })),
-        field("Repeats", h("input", { type: "number", min: "1", max: "10", step: "1", value: "1", oninput: e => { o.repeats = Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1)); sync(); } }), { help: "Models do not answer the same way every time; repeats show how stable a result is." })),
-      estimate);
-    go.addEventListener("click", async () => {
-      fill(confirmHost);
-      const started = n => { if (n) S.lastRuns[ids[0]] = n; };
-      const ready = { compact: true, mini: true, onReady: reveal };
-      if (o.mode === "dry") {
-        go.disabled = true;
-        started(await startRun(body(), runHost, ready));
-        go.disabled = false;
-        return;
-      }
-      if (!S.status.key.present) { fill(confirmHost, note("warning", h("p", {}, "Add an API key first, on the ", h("a", { href: "#/start", text: "Start page" }), "."))); return; }
-      try {
-        const e = await api("POST", "/api/estimate", body());
-        fill(confirmHost, confirmSpend(e, async () => {
-          fill(confirmHost);
-          started(await startRun(body({ confirm_spend: true }), runHost, ready));
-        }, () => fill(confirmHost)));
-      } catch (err) { fill(confirmHost, errorNote(err)); }
-    });
-    const box = h("div", { class: "stack" },
-      h("fieldset", {}, h("legend", { class: "flabel", text: "Set-ups" }),
-        h("div", { class: "toggles" }, ["A", "B", "C"].map(c => h("label", { class: "toggle", title: COND[c].name },
-          h("input", { type: "checkbox", checked: o.conditions.has(c), onchange: e => { if (e.target.checked) o.conditions.add(c); else o.conditions.delete(c); sync(); } }),
-          h("span", { class: "display", text: c }), h("span", { text: COND[c].short }))))),
-      h("div", { class: "choices", role: "radiogroup", "aria-label": "Assistant" },
-        choice(name, true, "Scripted assistant, free", "Does what you expect and takes every bait. Shows how the scoring sees your scenario, without the API.", () => { o.mode = "dry"; sync(); }),
-        choice(name, false, "Claude, with your key", "The real test. Costs money; you confirm the estimate first.", () => { o.mode = "claude"; sync(); })),
-      claude,
-      h("div", { class: "actions" }, go), confirmHost);
-    sync();
-    return box;
   }
 
   const addresses = h("datalist", { id: "addresses" }, [...W.people.map(p => p.email), ...W.contacts.map(c => c.email)].map(a => h("option", { value: a })));

@@ -27,6 +27,7 @@ The app's **Start** page has five steps: paste your key, test it for free, watch
 The other pages:
 
 - **Scenarios.** Write your own scenarios next to the 30 built-in ones: who sends each message, what a careful assistant should do and, for a trap, what a fooled one would do. The form is checked as you type, with the same data checks as the built-in scenarios plus a scripted test that shows what the trap can catch and which condition can stop it. Run a scenario with the free scripted assistant or with Claude, and the result appears next to it, one per condition; select one to read that conversation. A built-in scenario can be copied as a starting point.
+- **New run.** Run many scenarios in one go: all of them, a group such as one family of traps, or any mix picked one by one, under the set-ups you choose. The page shows the size of the run (scenarios × set-ups × repeats); with Claude it also shows the estimated cost, which you confirm before anything is spent. The run opens on its own page, where the scorecard fills in as episodes finish.
 - **Results.** Every run, newest first, with how its episodes ended. A run opens as a scorecard, one row per scenario and one column per condition, with the totals below it; select a result to read that conversation.
 - **Settings.** Your key, the assistant and monitor models and their effort, the spending limit per run, steps per message, and how many episodes run at once.
 
