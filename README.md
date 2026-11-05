@@ -22,7 +22,7 @@ python3 -m venv .venv
 .venv/bin/python -m authz_pilot app      # opens http://127.0.0.1:8765/ in your browser
 ```
 
-The app's **Start** page has four steps: paste your key, test it for free, watch a free run with a scripted assistant, then run Claude on two scenarios. With the default models that last step costs about $0.09; the page shows the estimate and asks before it spends anything.
+The app's **Start** page has four steps: paste your key, test it for free, watch a free run with a scripted assistant, then run Claude on two scenarios. With the default models that last step is estimated at about $0.09; the page shows the estimate and asks before it spends anything.
 
 The other pages:
 

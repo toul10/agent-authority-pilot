@@ -575,8 +575,9 @@ def serve(*, port: int = 8765, open_browser: bool = True, results: Path | None =
         print(f"Cannot listen on 127.0.0.1:{port} ({exc.strerror}). Try another port: python -m authz_pilot app --port {port + 1}")
         return 1
     url = f"http://127.0.0.1:{app.port}/"
-    print(f"The app is running at {url} (this computer only). Press Ctrl-C to stop it.")
-    print(f"Runs are saved in {app.results}")
+    # Flushed, so the address shows up at once even when the output goes to a log file.
+    print(f"The app is running at {url} (this computer only). Press Ctrl-C to stop it.", flush=True)
+    print(f"Runs are saved in {app.results}", flush=True)
     if open_browser:
         webbrowser.open(url)
     try:

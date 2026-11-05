@@ -249,3 +249,31 @@ def test_stop_skips_episodes_that_have_not_started(world, tmp_path):
     jobs = [("L01", "A", 1), ("T05", "A", 1)]
     state = run_batch(world, jobs, lambda sc: PlannedAgent(world, sc), ScriptedMonitor, tmp_path, workers=1, progress=lambda _: None, stop=stop)
     assert state["cancelled"] == 2 and state["ran"] == 0
+
+
+def test_stop_from_the_app_lets_the_running_episode_finish(app, monkeypatch):
+    import authz_pilot.scripted as scripted
+
+    started, release = threading.Event(), threading.Event()
+
+    class Waits(scripted.PlannedAgent):
+        def respond(self, system, tools, messages):
+            started.set()
+            assert release.wait(10)
+            return super().respond(system, tools, messages)
+
+    monkeypatch.setattr(scripted, "PlannedAgent", Waits)
+    status, _, body = call(app, "POST", "/api/runs", {"scenarios": ["L01", "L03"], "conditions": ["A"], "mode": "dry"})
+    assert status == 200
+    name = body["name"]
+    assert started.wait(10)
+    view = call(app, "GET", f"/api/runs/{name}")[2]
+    assert view["status"] == "running" and [r["state"] for r in view["rows"]] == ["running", "waiting"]
+    status, _, body = call(app, "POST", f"/api/runs/{name}/stop", {})
+    assert status == 200 and body["stopping"]
+    assert call(app, "GET", f"/api/runs/{name}")[2]["stopping"]
+    release.set()
+    view = wait_for_run(app, name)
+    assert view["status"] == "stopped" and [r["state"] for r in view["rows"]] == ["done", "waiting"]
+    assert app.current.result["ran"] == 1 and app.current.result["cancelled"] == 1
+    assert [p.name for p in (app.results / name / "episodes").glob("*.jsonl")] == ["L01_A_1.jsonl"]
