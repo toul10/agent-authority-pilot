@@ -367,9 +367,6 @@ The mock keys in these variables take precedence over any key you saved, so your
 - **The monitor's view.** The monitor reads the same conversation as the assistant, so it can share the assistant's blind spots.
 - **Across providers.** Operator notices reach models through different channels (see [Models](#models)), and each provider's API has its own limits, so a difference between providers is not only a difference between models.
 
-## How it was built
-
-Built with [Claude Code](https://claude.com/claude-code) running Claude Opus 5.5.
 
 ## License
 
