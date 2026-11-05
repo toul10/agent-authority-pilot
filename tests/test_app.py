@@ -76,9 +76,12 @@ def test_the_page_carries_the_token_and_cannot_be_framed(app):
     assert status == 200 and f'content="{app.token}"' in page
     assert headers["x-frame-options"] == "DENY"
     assert "frame-ancestors 'none'" in headers["content-security-policy"] and "script-src 'self'" in headers["content-security-policy"]
+    assert "font-src 'self'" in headers["content-security-policy"]
     assert headers["cache-control"] == "no-store" and headers["x-content-type-options"] == "nosniff"
-    status, headers, _ = call(app, "GET", "/static/app.js", token=False)
-    assert status == 200 and headers["content-type"].startswith("text/javascript")
+    for path, kind in (("/static/app.js", "text/javascript"), ("/static/report.js", "text/javascript"),
+                       ("/static/report.css", "text/css"), ("/static/fonts/commissioner.woff2", "font/woff2")):
+        status, headers, _ = call(app, "GET", path, token=False)
+        assert status == 200 and headers["content-type"].startswith(kind), path
     for path in ("/static/../app.py", "/static/app.html", "/static/", "/nope"):
         assert call(app, "GET", path, token=False)[0] == 404, path
     assert call(app, "POST", "/", {}, token=False)[0] == 405
@@ -161,8 +164,17 @@ def test_a_free_dry_run_shows_live_rows_and_the_dashboard(app, tmp_path):
     assert view["status"] == "done" and view["done"] == 4
     outcomes = {r["key"]: r["outcome"] for r in view["rows"]}
     assert outcomes == {"L01_A_1": "ok", "L01_B_1": "ok", "T05_A_1": "violation", "T05_B_1": "stopped"}
+    assert {r["key"]: r["stopped_by"] for r in view["rows"]}["T05_B_1"] == ["code"]
     assert view["config"]["conditions"] == ["A", "B"] and "data_dir" not in view["config"]
-    assert any(r["name"] == name for r in call(app, "GET", "/api/runs")[2]["runs"])
+    listed = next(r for r in call(app, "GET", "/api/runs")[2]["runs"] if r["name"] == name)
+    assert listed["outcomes"] == {"ok": 2, "violation": 1, "stopped": 1}
+
+    # The app draws the run page itself from the same data as dashboard.html.
+    assert call(app, "GET", f"/api/runs/{name}/report", token=False)[0] == 403
+    status, headers, report = call(app, "GET", f"/api/runs/{name}/report")
+    assert status == 200 and headers["content-security-policy"].startswith("default-src 'none'")
+    assert report["run"] == name and len(report["episodes"]) == 4 and "data_dir" not in report["config"]
+    assert all(e["events"] for e in report["episodes"])
 
     status, headers, html = call(app, "GET", f"/runs/{name}/", token=False)
     assert status == 200 and headers["x-frame-options"] == "SAMEORIGIN"
@@ -171,12 +183,15 @@ def test_a_free_dry_run_shows_live_rows_and_the_dashboard(app, tmp_path):
     page_script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]  # the code, not the data block
     digest = base64.b64encode(hashlib.sha256(page_script.encode("utf-8")).digest()).decode()
     assert f"'sha256-{digest}'" in csp
+    # The page stands alone, font included, so it may load fonts only from itself.
+    assert "font-src data:" in csp and "data:font/woff2;base64," in html
 
 
 def test_run_names_are_checked(app):
     for name in ("..", "..%2F..%2Fetc", "nope", "a..b", "%2e%2e"):
         assert call(app, "GET", f"/api/runs/{name}")[0] == 404, name
         assert call(app, "GET", f"/runs/{name}/", token=False)[0] == 404, name
+        assert call(app, "GET", f"/api/runs/{name}/report")[0] == 404, name
     assert call(app, "POST", "/api/runs/nope/stop", {})[0] == 404
 
 

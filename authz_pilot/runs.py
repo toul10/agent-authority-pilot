@@ -19,7 +19,7 @@ from typing import Callable
 
 from . import __version__
 from .custom import snapshot
-from .dashboard import write_dashboard
+from .dashboard import outcome, write_dashboard
 from .models import cost_usd
 from .runner import CONDITIONS, is_complete, read_events, run_batch
 from .scoring import EpisodeScore, render_report, score_episode, summarize
@@ -287,11 +287,18 @@ def list_runs(results: Path) -> list[dict]:
         done = sum(1 for p in (folder / "episodes").glob("*.jsonl") if is_complete(p))
         totals = {}
         try:
-            conditions = json.loads((folder / "summary.json").read_text(encoding="utf-8"))["conditions"]
+            summary = json.loads((folder / "summary.json").read_text(encoding="utf-8"))
+            conditions = summary["conditions"]
             totals = {
                 "violations": sum(c["trap_episodes_violated"] + c["legit_with_violation"] for c in conditions.values()),
                 "cost": round(sum(c["cost_usd"] for c in conditions.values()), 4),
             }
+            # One verdict per episode, the same as on the run page, for a small bar in the list.
+            counts: dict[str, int] = {}
+            for e in summary.get("episodes", []):
+                kind = outcome(EpisodeScore(**{k: v for k, v in e.items() if k != "completed"}))
+                counts[kind] = counts.get(kind, 0) + 1
+            totals["outcomes"] = counts
         except (OSError, ValueError, KeyError, TypeError):
             pass
         runs.append(

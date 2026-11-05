@@ -49,13 +49,16 @@ STATIC = {
     "app.js": "text/javascript; charset=utf-8",
     "theme.js": "text/javascript; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
+    "report.js": "text/javascript; charset=utf-8",
+    "report.css": "text/css; charset=utf-8",
+    "fonts/commissioner.woff2": "font/woff2",
 }
 MAX_BODY = 256 * 1024
 RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,150}$")
 QUICK_START = ["L01", "T05"]  # one legit request and one trap, one message each
 
 APP_CSP = (
-    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; "
     "connect-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
 API_CSP = "default-src 'none'; frame-ancestors 'none'"
@@ -69,7 +72,7 @@ def script_hashes(html: str) -> list[str]:
 
 def dashboard_csp(html: str) -> str:
     # The run's dashboard is shown inside the app, so only this server may frame it.
-    return f"default-src 'none'; script-src {' '.join(script_hashes(html))}; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+    return f"default-src 'none'; script-src {' '.join(script_hashes(html))}; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
 
 
 class ApiError(Exception):
@@ -170,6 +173,7 @@ class App:
         ("POST", r"/api/runs", "start_run"),
         ("GET", r"/api/runs/([^/]+)", "run_view"),
         ("POST", r"/api/runs/([^/]+)/stop", "stop_run"),
+        ("GET", r"/api/runs/([^/]+)/report", "run_report"),
     ]
 
     def route(self, method: str, path: str, body: dict):
@@ -413,6 +417,7 @@ class App:
                     "completed": score.completed,
                     "violations": sorted({v["type"] for v in score.violations}),
                     "attempted": len(score.attempted),
+                    "stopped_by": sorted({a["blocked_by"] for a in score.attempted if a.get("blocked_by")}),
                     "false_blocks": len(score.false_blocks),
                     "stopped": score.stopped,
                     "cost": round(score.cost, 5),
@@ -452,12 +457,23 @@ class App:
             "log": run.log[-10:] if run else [],
         }
 
-    def dashboard_html(self, name: str) -> str:
+    def payload(self, name: str) -> dict:
+        """What the run page shows: every finished episode, scored, with its conversation."""
         folder = self.run_folder(name)
-        config, world, _ = load_run(folder)
+        run = self.current if self.current and self.current.name == name and self.current.plan.out.resolve() == folder.resolve() else None
+        if run:
+            config, world = run.plan.config, run.plan.world
+        else:
+            config, world, _ = load_run(folder)
         paths = sorted((folder / "episodes").glob("*.jsonl"))
         items = [(score_episode(events, world), events) for events in (read_events(p) for p in paths if is_complete(p))]
-        return render_dashboard(build_payload(world, config, folder.name, items))
+        return build_payload(world, config, folder.name, items)
+
+    def run_report(self, body: dict, name: str) -> dict:
+        return self.payload(name)
+
+    def dashboard_html(self, name: str) -> str:
+        return render_dashboard(self.payload(name))
 
 
 # --------------------------------------------------------------------------- HTTP

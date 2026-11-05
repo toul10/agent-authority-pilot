@@ -20,7 +20,7 @@ dev = ["pytest>=8"]
 packages = ["authz_pilot"]
 
 [tool.setuptools.package-data]
-authz_pilot = ["web/*"]
+authz_pilot = ["web/*", "web/fonts/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

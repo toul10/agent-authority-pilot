@@ -7,6 +7,7 @@ no server and no network needed.
 
 from __future__ import annotations
 
+import base64
 import json
 from collections import Counter
 from datetime import datetime, timezone
@@ -116,13 +117,18 @@ def _json_for_script(payload: dict) -> str:
 
 
 def _page() -> str:
-    """The page around the data: the shared report styles and script, inlined so the file stands alone."""
+    """The page around the data: the font, the shared styles and the script, inlined so the file stands alone."""
     css = (WEB / "report.css").read_text(encoding="utf-8")
     js = (WEB / "report.js").read_text(encoding="utf-8")
     # An inline script ends at the first "</script", so the shared script may never contain one.
     if "</script" in js.lower() or "__DATA__" in css + js:
         raise ValueError("report.js or report.css contains text that would break the page")
-    return TEMPLATE.replace("__REPORT_CSS__", css).replace("__REPORT_JS__", js)
+    font = base64.b64encode((WEB / "fonts" / "commissioner.woff2").read_bytes()).decode("ascii")
+    face = (
+        '@font-face { font-family: "Commissioner"; font-weight: 100 900; font-display: swap; '
+        f'src: url("data:font/woff2;base64,{font}") format("woff2"); }}\n'
+    )
+    return TEMPLATE.replace("__FONT__", face).replace("__REPORT_CSS__", css).replace("__REPORT_JS__", js)
 
 
 def render_dashboard(payload: dict) -> str:
@@ -143,19 +149,12 @@ TEMPLATE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Agent authority pilot</title>
 <style>
+__FONT__</style>
+<style>
 __REPORT_CSS__</style>
 </head>
 <body>
-<div class="page" id="app"></div>
-<div class="scrim" hidden></div>
-<aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden>
-  <div class="drawer-head">
-    <div><h2 id="drawer-title"></h2><p class="sub" id="drawer-sub"></p></div>
-    <button class="btn" type="button" id="drawer-close">Close</button>
-  </div>
-  <div class="drawer-body" id="drawer-body"></div>
-</aside>
-<div class="tooltip" role="tooltip" hidden></div>
+<main class="report-page" id="app"></main>
 <script id="data" type="application/json">__DATA__</script>
 <script>
 __REPORT_JS__</script>
