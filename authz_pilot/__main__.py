@@ -1,5 +1,6 @@
-"""Command line: validate, run, report, dashboard, show.
+"""Command line: key, validate, run, report, dashboard, show.
 
+    python -m authz_pilot key set          # paste your API key (hidden); key test checks it for free
     python -m authz_pilot validate
     python -m authz_pilot run --dry-run
     python -m authz_pilot run --scenarios L01,T09 --conditions A
@@ -11,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import subprocess
@@ -22,13 +24,13 @@ from pathlib import Path
 from . import __version__
 from .checks import scripted_checks
 from .dashboard import write_dashboard
-from .models import DEFAULT_AGENT_MODEL, DEFAULT_MONITOR_MODEL
+from .models import EFFORTS, MODELS, check_models
 from .prompts import render_transcript
 from .runner import CONDITIONS, is_complete, read_events, run_batch
 from .scoring import render_report, score_episode, summarize
+from .settings import describe_source, load_settings, mask, parse_settings, remove_key, resolve_key, save_key
 from .world import DEFAULT_DATA_DIR, load_world, validate
 
-EFFORTS = ("low", "medium", "high", "xhigh", "max")
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -131,6 +133,11 @@ def cmd_run(args) -> int:
     jobs = [(sid, c, r) for r in range(1, args.repeats + 1) for sid in scenario_ids for c in conditions]
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     out = args.out or ROOT / "results" / (f"{stamp}-dry-run" if args.dry_run else stamp)
+    # Flags override the saved settings (python -m authz_pilot app, Settings page).
+    flags = {"model": args.model, "effort": args.effort, "monitor_model": args.monitor_model, "monitor_effort": args.monitor_effort, "max_steps": args.max_steps, "workers": args.workers, "max_cost": args.max_cost}
+    s, bad = parse_settings({k: v for k, v in flags.items() if v is not None}, load_settings())
+    if bad:
+        raise SystemExit("; ".join(f"--{k.replace('_', '-')}: {v}" for k, v in bad.items()))
 
     if args.dry_run:
         from .scripted import PlannedAgent, ScriptedMonitor
@@ -144,17 +151,21 @@ def cmd_run(args) -> int:
         def make_monitor():
             return ScriptedMonitor()
     else:
-        if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-            print("No API key found. Set ANTHROPIC_API_KEY, for example from the macOS Keychain:")
-            print('  export ANTHROPIC_API_KEY="$(security find-generic-password -a "$USER" -s anthropic-api-key -w)"')
-            print("Or try everything without a key: python -m authz_pilot run --dry-run")
+        key, source = resolve_key()
+        if not key and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+            print("No API key found. Save one (the input is hidden):  python -m authz_pilot key set")
+            print("or set ANTHROPIC_API_KEY. On macOS a Keychain item works too:")
+            print('  security add-generic-password -a "$USER" -s anthropic-api-key -U -w')
+            print("To try everything without a key: python -m authz_pilot run --dry-run")
             return 2
         from .models import AnthropicAgent, AnthropicMonitor
 
-        config = {"agent": args.model, "effort": args.effort, "monitor": args.monitor_model if "C" in conditions else None, "monitor_effort": args.monitor_effort if "C" in conditions else None, "dry_run": False}
+        use_monitor = "C" in conditions
+        config = {"agent": s.model, "effort": s.effort, "monitor": s.monitor_model if use_monitor else None, "monitor_effort": s.monitor_effort if use_monitor else None, "dry_run": False}
         print(f"About to run {len(jobs)} episodes: {len(scenario_ids)} scenarios × conditions {','.join(conditions)} × {args.repeats} repeat(s).")
-        print(f"Assistant: {args.model} (effort {args.effort})" + (f"; monitor: {args.monitor_model} (effort {args.monitor_effort})" if "C" in conditions else ""))
-        print(f"No new episode starts once the estimated spend passes ${args.max_cost:.2f}.")
+        print(f"Assistant: {s.model} (effort {s.effort})" + (f"; monitor: {s.monitor_model} (effort {s.monitor_effort})" if use_monitor else ""))
+        print(f"API key: {describe_source(source)}" + (f" ({mask(key)})" if key else ""))
+        print(f"No new episode starts once the estimated spend passes ${s.max_cost:.2f}.")
         if not args.yes:
             if not sys.stdin.isatty():
                 print("Not a terminal; add --yes to confirm.")
@@ -162,8 +173,8 @@ def cmd_run(args) -> int:
             if input("Continue? [y/N] ").strip().lower() not in ("y", "yes"):
                 print("Cancelled.")
                 return 1
-        agent = AnthropicAgent(args.model, effort=args.effort)
-        monitor = AnthropicMonitor(args.monitor_model, effort=args.monitor_effort) if "C" in conditions else None
+        agent = AnthropicAgent(s.model, effort=s.effort, api_key=key)
+        monitor = AnthropicMonitor(s.monitor_model, effort=s.monitor_effort, api_key=key) if use_monitor else None
 
         def make_agent(scenario):
             return agent
@@ -179,7 +190,7 @@ def cmd_run(args) -> int:
         "conditions": conditions,
         "scenarios": scenario_ids,
         "repeats": args.repeats,
-        "max_steps": args.max_steps,
+        "max_steps": s.max_steps,
     }
     out.mkdir(parents=True, exist_ok=True)
     config_path = out / "config.json"
@@ -192,7 +203,7 @@ def cmd_run(args) -> int:
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
     meta = {k: config.get(k) for k in ("agent", "effort", "monitor", "monitor_effort")}
-    state = run_batch(world, jobs, make_agent, make_monitor, out, workers=1 if args.dry_run else args.workers, max_cost=None if args.dry_run else args.max_cost, max_steps=args.max_steps, meta=meta, progress=(lambda _: None) if args.dry_run else print)
+    state = run_batch(world, jobs, make_agent, make_monitor, out, workers=1 if args.dry_run else s.workers, max_cost=None if args.dry_run else s.max_cost, max_steps=s.max_steps, meta=meta, progress=(lambda _: None) if args.dry_run else print)
     scores = _write_report(out, world, config)
     print((out / "report.md").read_text(encoding="utf-8"))
     print(f"Episodes run: {state['ran']}, already done: {state['skipped']}, not started (budget): {state['over_budget']}. Estimated spend: ${state['spent']:.2f}.")
@@ -205,6 +216,47 @@ def cmd_run(args) -> int:
     print(f"Report: {out / 'report.md'}")
     print(f"Dashboard: {out / 'dashboard.html'}  (python -m authz_pilot dashboard {out})")
     return 0
+
+
+def cmd_key(args) -> int:
+    if args.action == "set":
+        key = getpass.getpass("Paste your Anthropic API key (it is not shown): ").strip()
+        try:
+            path = save_key(key)
+        except ValueError as exc:
+            print(exc)
+            return 1
+        print(f"Saved in {path}, readable only by your user.")
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            print("Note: ANTHROPIC_API_KEY is set in this shell, and it is used instead of the saved key.")
+        print("Check it for free: python -m authz_pilot key test")
+        return 0
+    if args.action == "remove":
+        print("Removed the saved key." if remove_key() else "There was no saved key.")
+        key, source = resolve_key()
+        if key:
+            print(f"Still in use: {describe_source(source)} ({mask(key)}).")
+        return 0
+
+    key, source = resolve_key()
+    print(f"API key: {describe_source(source)}" + (f" ({mask(key)})" if key else ""))
+    if args.action == "status":
+        return 0 if key else 1
+    if not key and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        print("Save one first: python -m authz_pilot key set")
+        return 2
+    s = load_settings()
+    result = check_models({"assistant": (s.model, s.effort), "monitor": (s.monitor_model, s.monitor_effort)}, api_key=key)
+    if result["error"]:
+        print(result["error"])
+        return 1
+    for row in result["models"]:
+        status = "ok  " if row["ok"] else "FAIL"
+        problems = "" if row["ok"] else ": " + "; ".join(row["problems"])
+        print(f"{status} {row['role']:<9} {row['name']} ({row['model']}), effort {row['effort']}{problems}")
+    print("The key works, and both models can do what the harness needs." if result["ok"] else "Pick other models or efforts in the settings, then test again.")
+    print("These checks are free: they use the Models API, not tokens.")
+    return 0 if result["ok"] else 1
 
 
 def cmd_report(args) -> int:
@@ -255,6 +307,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m authz_pilot", description="Agent authority pilot")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    k = sub.add_parser("key", help="save, check or remove your Anthropic API key")
+    k.add_argument("action", choices=["set", "test", "status", "remove"], help="set: paste it (hidden); test: free check of the key and the models; status: where it comes from; remove: delete the saved key")
+    k.set_defaults(func=cmd_key)
+
     v = sub.add_parser("validate", help="check the data and run the scripted checks (no API calls)")
     v.add_argument("--data", default=str(DEFAULT_DATA_DIR))
     v.set_defaults(func=cmd_validate)
@@ -263,13 +319,13 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--conditions", default="A,B,C", help="comma-separated subset of A,B,C")
     r.add_argument("--scenarios", default="all", help="comma-separated ids, or all, legit, trap")
     r.add_argument("--repeats", type=int, default=1)
-    r.add_argument("--model", default=DEFAULT_AGENT_MODEL)
-    r.add_argument("--effort", default="medium", choices=EFFORTS)
-    r.add_argument("--monitor-model", default=DEFAULT_MONITOR_MODEL)
-    r.add_argument("--monitor-effort", default="medium", choices=EFFORTS)
-    r.add_argument("--max-steps", type=int, default=8, help="model calls allowed per message")
-    r.add_argument("--workers", type=int, default=4, help="episodes run in parallel")
-    r.add_argument("--max-cost", type=float, default=20.0, help="USD; no new episode starts after the estimate passes this")
+    r.add_argument("--model", choices=list(MODELS), help="the assistant (default: the saved setting, else claude-opus-5-5)")
+    r.add_argument("--effort", choices=EFFORTS, help="default: the saved setting, else medium")
+    r.add_argument("--monitor-model", choices=list(MODELS), help="the monitor in condition C (default: the saved setting, else claude-sonnet-5-5)")
+    r.add_argument("--monitor-effort", choices=EFFORTS, help="default: the saved setting, else medium")
+    r.add_argument("--max-steps", type=int, help="model calls allowed per message (default 8)")
+    r.add_argument("--workers", type=int, help="episodes run in parallel (default 4)")
+    r.add_argument("--max-cost", type=float, help="USD; no new episode starts after the estimate passes this (default 20)")
     r.add_argument("--out", type=Path, help="run directory (default: results/<timestamp>)")
     r.add_argument("--dry-run", action="store_true", help="use a scripted agent; no API key needed")
     r.add_argument("--scripted-agent", choices=["gullible", "oracle"], default="gullible", help="which scripted agent --dry-run uses")

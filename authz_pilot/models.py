@@ -12,12 +12,23 @@ from typing import Any
 
 DEFAULT_AGENT_MODEL = "claude-opus-5-5"
 DEFAULT_MONITOR_MODEL = "claude-sonnet-5-5"
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+# The models you can pick. Each one needs a price below: without it the
+# --max-cost budget could not count what a run spends.
+MODELS = {
+    "claude-fable-5-1": "Claude Fable 5.1",
+    "claude-opus-5-5": "Claude Opus 5.5",
+    "claude-sonnet-5-5": "Claude Sonnet 5.5",
+    "claude-haiku-5-5": "Claude Haiku 5.5",
+}
 
 USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
 # USD per million tokens: (input, output, cache read). 5-minute cache writes cost 1.25x input.
 # Check https://platform.claude.com/docs/en/about-claude/pricing before relying on these.
 PRICES = {
+    "claude-fable-5-1": (10.00, 50.00, 0.25),
     "claude-opus-5-5": (4.00, 20.00, 0.20),
     "claude-sonnet-5-5": (2.00, 10.00, 0.20),
     "claude-haiku-5-5": (0.10, 0.50, 0.01),  # prompts up to 100K tokens
@@ -105,22 +116,23 @@ class Verdict:
     error: str | None = None
 
 
-def _client(client):
+def _client(client, api_key: str | None = None):
     if client is not None:
         return client
     import anthropic
 
-    return anthropic.Anthropic(max_retries=4)
+    # api_key=None lets the SDK read ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN itself.
+    return anthropic.Anthropic(api_key=api_key, max_retries=4)
 
 
 class AnthropicAgent:
     """The assistant under test: one `messages.create` call per step of the agent loop."""
 
-    def __init__(self, model: str = DEFAULT_AGENT_MODEL, effort: str = "medium", max_tokens: int = 8000, client=None):
+    def __init__(self, model: str = DEFAULT_AGENT_MODEL, effort: str = "medium", max_tokens: int = 8000, client=None, api_key: str | None = None):
         self.model = model
         self.effort = effort
         self.max_tokens = max_tokens
-        self.client = _client(client)
+        self.client = _client(client, api_key)
 
     def respond(self, system: str, tools: list[dict], messages: list[dict]) -> Step:
         response = self.client.messages.create(
@@ -129,7 +141,7 @@ class AnthropicAgent:
             system=system,
             tools=tools,
             messages=messages,
-            # Thinking is always on for Claude Opus 5.5; "summarized" puts a readable
+            # Thinking is always on for the current models; "summarized" puts a readable
             # summary in the logs. Effort is set explicitly so runs are comparable.
             thinking={"type": "adaptive", "display": "summarized"},
             output_config={"effort": self.effort},
@@ -161,11 +173,11 @@ VERDICT_SCHEMA = {
 class AnthropicMonitor:
     """Reviews one proposed action and returns allow/block as structured JSON."""
 
-    def __init__(self, model: str = DEFAULT_MONITOR_MODEL, effort: str = "medium", max_tokens: int = 4000, client=None):
+    def __init__(self, model: str = DEFAULT_MONITOR_MODEL, effort: str = "medium", max_tokens: int = 4000, client=None, api_key: str | None = None):
         self.model = model
         self.effort = effort
         self.max_tokens = max_tokens
-        self.client = _client(client)
+        self.client = _client(client, api_key)
 
     def review(self, system: str, prompt: str, request: dict | None = None) -> Verdict:
         response = self.client.messages.create(
@@ -194,3 +206,68 @@ class AnthropicMonitor:
         if decision not in ("allow", "block"):
             return Verdict("block", "The monitor gave no valid decision.", error=f"decision={decision!r}", **meta)
         return Verdict(decision, reason, **meta)
+
+
+# --------------------------------------------------------------------------- key check
+
+
+def _capability_problems(caps: Any, role: str, effort: str) -> list[str]:
+    """What this model lacks for its role. Unknown capabilities are not problems."""
+    caps = to_dict(caps) if caps is not None else None
+    if not isinstance(caps, dict):
+        return []
+
+    def supported(*path: str) -> bool | None:
+        node: Any = caps
+        for key in path:
+            node = node.get(key) if isinstance(node, dict) else None
+        return node.get("supported") if isinstance(node, dict) else None
+
+    problems = []
+    if supported("effort") is False or supported("effort", effort) is False:
+        problems.append(f"does not support effort {effort}")
+    if role == "assistant" and supported("thinking", "types", "adaptive") is False:
+        problems.append("does not support adaptive thinking, which the assistant uses")
+    if role == "monitor" and supported("structured_outputs") is False:
+        problems.append("does not support structured outputs, which the monitor uses")
+    return problems
+
+
+def check_models(roles: dict[str, tuple[str, str]], *, api_key: str | None = None, client=None) -> dict:
+    """Free checks with the Models API (no tokens): does the key work, and can
+    each model do what the harness asks of it?
+
+    `roles` maps "assistant" and "monitor" to (model, effort).
+    """
+    import anthropic
+
+    client = client or anthropic.Anthropic(api_key=api_key, max_retries=1, timeout=20)
+    rows: list[dict] = []
+    seen: dict[str, Any] = {}
+    for role, (model, effort) in roles.items():
+        row = {"role": role, "model": model, "effort": effort, "name": MODELS.get(model, model), "ok": False, "problems": []}
+        rows.append(row)
+        try:
+            if model not in seen:
+                seen[model] = client.models.retrieve(model)
+        except anthropic.AuthenticationError:
+            return {"ok": False, "error": "The API did not accept this key (401). Copy it again from the Claude Console.", "models": rows}
+        except anthropic.PermissionDeniedError:
+            row["problems"].append("this key may not use this model (403)")
+            continue
+        except anthropic.NotFoundError:
+            row["problems"].append("the API does not know this model, or this key cannot see it (404)")
+            continue
+        except anthropic.RateLimitError:
+            row["problems"].append("rate limited (429); try again in a minute")
+            continue
+        except anthropic.APIStatusError as exc:
+            row["problems"].append(f"the API answered with an error ({exc.status_code})")
+            continue
+        except anthropic.APIConnectionError:
+            return {"ok": False, "error": "Could not reach the API. Check the internet connection.", "models": rows}
+        info = seen[model]
+        row["name"] = getattr(info, "display_name", None) or row["name"]
+        row["problems"] = _capability_problems(getattr(info, "capabilities", None), role, effort)
+        row["ok"] = not row["problems"]
+    return {"ok": all(r["ok"] for r in rows), "error": None, "models": rows}

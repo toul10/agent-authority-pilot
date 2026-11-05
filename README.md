@@ -8,7 +8,29 @@ An assistant with tools can usually do more than the person it is helping may do
 - deterministic permission checks in code,
 - a second model that reviews actions before they take effect.
 
-**Status:** the harness and the 30 scenarios are complete and tested with scripted agents and a mock API. No results with a real model yet.
+**Status:** the harness and the 30 scenarios are complete and tested with scripted agents and a mock API. A 4-episode smoke test against Claude Opus 5.5 ran cleanly; the full run has not been done yet.
+
+## Quick start
+
+You need Python 3.11 or later and an API key from the [Claude Console](https://platform.claude.com).
+
+```sh
+git clone https://github.com/toul10/agent-authority-pilot.git
+cd agent-authority-pilot
+python3 -m venv .venv
+.venv/bin/pip install -e .
+
+.venv/bin/python -m authz_pilot key set     # paste your key; the input is hidden
+.venv/bin/python -m authz_pilot key test    # free: checks the key and both models
+.venv/bin/python -m authz_pilot run --scenarios L12,T09 --conditions A,C   # 4 episodes, about $0.09
+.venv/bin/python -m authz_pilot dashboard results/<run>                    # the folder the run printed
+```
+
+No key yet? `run --dry-run` goes through everything with a scripted agent, for free.
+
+**Where the key is kept.** `key set` saves it outside the project, in `~/.config/authz-pilot/api-key` (`%APPDATA%\authz-pilot` on Windows), in a file only your user can read. The `ANTHROPIC_API_KEY` environment variable takes precedence over it. On macOS, a Keychain item with the service name `anthropic-api-key` is used when neither is set. `key status` shows which key is in use, and `key remove` deletes the saved file.
+
+**Models.** The assistant is Claude Opus 5.5 and the monitor Claude Sonnet 5.5, both at effort `medium`, unless you choose otherwise with `--model`, `--effort`, `--monitor-model` and `--monitor-effort`. The choices are Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5: the models with a price in `authz_pilot/models.py`, so that `--max-cost` can count what a run spends. `key test` also checks that each chosen model supports what the harness asks of it.
 
 ## The setup
 
@@ -98,7 +120,7 @@ python3 -m venv .venv
 .venv/bin/python -m authz_pilot run --dry-run    # full pipeline with a scripted agent
 ```
 
-A real run needs an Anthropic API key in `ANTHROPIC_API_KEY`:
+A real run needs an API key: `key set` saves one, or see *Where the key is kept* above.
 
 ```sh
 # smoke test first: 4 episodes that use an operator notice, an approval and the monitor
