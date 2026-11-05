@@ -298,11 +298,17 @@ def _custom_scenarios(path: Path, taken: set[str]) -> tuple[list[Scenario], byte
     return scenarios, data
 
 
+def _data_bytes(path: Path) -> bytes:
+    """A data file with Windows line endings read as Unix ones, so that a checkout with CRLF
+    (git's default on Windows) has the same data hash as the files the runs were made with."""
+    return path.read_bytes().replace(b"\r\n", b"\n")
+
+
 def load_world(data_dir: Path | str = DEFAULT_DATA_DIR, custom: Path | str | None = None) -> World:
     """The built-in world and scenarios, plus your own scenarios from `custom` if that file exists."""
     data_dir = Path(data_dir)
-    world_bytes = (data_dir / "world.toml").read_bytes()
-    scenario_bytes = (data_dir / "scenarios.toml").read_bytes()
+    world_bytes = _data_bytes(data_dir / "world.toml")
+    scenario_bytes = _data_bytes(data_dir / "scenarios.toml")
     w = tomllib.loads(world_bytes.decode("utf-8"))
     s = tomllib.loads(scenario_bytes.decode("utf-8"))
     scenarios = [_scenario(raw) for raw in s["scenario"]]
@@ -328,8 +334,8 @@ def only_added_since(data_dir: Path | str, data_hash: str) -> bool:
     """True if the data files a run used (its `data_hash`) are the current ones with scenarios
     only added at the end of scenarios.toml: every scenario the run could use is unchanged."""
     data_dir = Path(data_dir)
-    world_bytes = (data_dir / "world.toml").read_bytes()
-    scenario_bytes = (data_dir / "scenarios.toml").read_bytes()
+    world_bytes = _data_bytes(data_dir / "world.toml")
+    scenario_bytes = _data_bytes(data_dir / "scenarios.toml")
     digest, size = hashlib.sha256(world_bytes + b"\0"), 0
     for line in scenario_bytes.splitlines(keepends=True):
         digest.update(line)

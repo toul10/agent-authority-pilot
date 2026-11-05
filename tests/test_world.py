@@ -153,3 +153,16 @@ def test_published_runs_load_without_warnings():
     assert runs
     for run in runs:
         assert load_run(run)[2] == [], run.name
+
+
+def test_line_endings_do_not_change_the_data_hash(tmp_path):
+    # git on Windows checks the data out with CRLF line endings by default.
+    data, run = run_with_copied_data(tmp_path)
+    before = load_world(data).data_hash
+    for name in ("world.toml", "scenarios.toml"):
+        path = data / name
+        path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    assert load_world(data).data_hash == before
+    with (data / "scenarios.toml").open("a", encoding="utf-8", newline="\r\n") as f:
+        f.write(ADDED_LATER)
+    assert load_run(run)[2] == []
