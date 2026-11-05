@@ -192,12 +192,14 @@ def is_finished(path: Path) -> bool:
     return is_complete(path) and read_events(path)[-1].get("stopped") != "error"
 
 
-def run_batch(world: World, jobs: list[tuple[str, str, int]], make_agent, make_monitor, out_dir: Path, *, workers: int = 4, max_cost: float | None = None, max_steps: int = 8, meta: dict | None = None, progress=print) -> dict:
+def run_batch(world: World, jobs: list[tuple[str, str, int]], make_agent, make_monitor, out_dir: Path, *, workers: int = 4, max_cost: float | None = None, max_steps: int = 8, meta: dict | None = None, progress=print, observe=None) -> dict:
     """Run (scenario id, condition, repeat) jobs; one JSONL file per episode.
 
     Finished episode files are skipped, so an interrupted run can be resumed by
     running the same command again; episodes that stopped with an error run
     again. No new episode starts once the estimated spend passes `max_cost`.
+    `observe(job, episode)` is called before each episode runs, so a caller (the
+    app) can show its events while it runs.
     """
     (out_dir / "episodes").mkdir(parents=True, exist_ok=True)
     lock = threading.Lock()
@@ -216,7 +218,10 @@ def run_batch(world: World, jobs: list[tuple[str, str, int]], make_agent, make_m
                 return
         scenario = world.scenarios[scenario_id]
         monitor = make_monitor() if condition == "C" else None
-        events = run_episode(world, scenario, condition, make_agent(scenario), monitor, max_steps=max_steps, repeat=repeat, meta=meta)
+        episode = Episode(world, scenario, condition, make_agent(scenario), monitor, max_steps=max_steps, repeat=repeat, meta=meta)
+        if observe:
+            observe(job, episode)
+        events = episode.run()
         path.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in events), encoding="utf-8")
         cost = episode_cost(events)
         with lock:

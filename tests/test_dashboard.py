@@ -1,7 +1,8 @@
 import json
 import re
 
-from authz_pilot.__main__ import _data_dir, main
+from authz_pilot.__main__ import main
+from authz_pilot.runs import data_dir_of as _data_dir
 from authz_pilot.dashboard import build_payload, outcome, render_dashboard
 from authz_pilot.runner import run_episode
 from authz_pilot.scoring import EpisodeScore, render_report, score_episode

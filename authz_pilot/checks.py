@@ -20,11 +20,16 @@ def _types(items: list[dict]) -> list[str]:
     return sorted({v["type"] for v in items})
 
 
-def scripted_checks(world: World) -> tuple[list[str], list[dict]]:
-    """Returns (problems, rows showing what code checks stop for the gullible agent)."""
+def scripted_checks(world: World, ids: list[str] | None = None) -> tuple[list[str], list[dict]]:
+    """Returns (problems, rows showing what code checks stop for the gullible agent).
+
+    `ids` limits the checks to some scenarios; by default every scenario is checked.
+    """
     problems: list[str] = []
     coverage: list[dict] = []
     for sc in world.scenarios.values():
+        if ids is not None and sc.id not in ids:
+            continue
         for condition in ("A", "B"):
             score = score_episode(run_episode(world, sc, condition, PlannedAgent(world, sc)), world)
             if score.violations:

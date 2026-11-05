@@ -15,76 +15,39 @@ import argparse
 import getpass
 import json
 import os
-import subprocess
 import sys
 import webbrowser
-from datetime import datetime, timezone
 from pathlib import Path
 
-from . import __version__
 from .checks import scripted_checks
-from .dashboard import write_dashboard
 from .models import EFFORTS, MODELS, check_models
 from .prompts import render_transcript
-from .runner import CONDITIONS, is_complete, read_events, run_batch
-from .scoring import render_report, score_episode, summarize
+from .runner import CONDITIONS, is_complete, read_events
+from .runs import RunError, execute, load_run, pick_scenarios, plan_run, problems_for_run, write_report
+from .scoring import score_episode
 from .settings import describe_source, load_settings, mask, parse_settings, remove_key, resolve_key, save_key
-from .world import DEFAULT_DATA_DIR, load_world, validate
-
-ROOT = Path(__file__).resolve().parent.parent
+from .world import DEFAULT_DATA_DIR, CustomScenarioError, custom_path, load_world, validate
 
 
-def _portable(path: Path) -> str:
-    """A data path as stored in config.json: relative to the project when inside it."""
-    path = path.resolve()
+def _world(data_dir) -> object | None:
     try:
-        return str(path.relative_to(ROOT))
-    except ValueError:
-        return str(path)
-
-
-def _data_dir(config: dict) -> Path:
-    """The data a run used. If that folder is gone (the project moved), use the project's own."""
-    saved = config.get("data_dir")
-    if saved:
-        path = Path(saved)
-        if not path.is_absolute():
-            path = ROOT / path
-        if (path / "world.toml").is_file():
-            return path
-    return DEFAULT_DATA_DIR
-
-
-def _load_run(run_dir: Path) -> tuple[dict, object]:
-    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
-    world = load_world(_data_dir(config))
-    if config.get("data_hash") != world.data_hash:
-        print(f"Warning: the data files changed since this run (run {config.get('data_hash')}, now {world.data_hash}).")
-    return config, world
-
-
-def _git_commit() -> str | None:
-    try:
-        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True, timeout=5)
-        return out.stdout.strip() or None
-    except (OSError, subprocess.SubprocessError):
+        return load_world(data_dir, custom=custom_path())
+    except CustomScenarioError as exc:
+        print(f"Your scenarios cannot be read: {exc}")
         return None
 
 
-def _pick_scenarios(world, spec: str) -> list[str]:
-    if spec == "all":
-        return list(world.scenarios)
-    if spec in ("legit", "trap"):
-        return [s.id for s in world.scenarios.values() if s.kind == spec]
-    ids = [x.strip().upper() for x in spec.split(",") if x.strip()]
-    unknown = [x for x in ids if x not in world.scenarios]
-    if unknown:
-        raise SystemExit(f"Unknown scenario ids: {', '.join(unknown)}")
-    return ids
+def _load_run(run_dir: Path):
+    config, world, warnings = load_run(run_dir)
+    for warning in warnings:
+        print(f"Warning: {warning}.")
+    return config, world
 
 
 def cmd_validate(args) -> int:
-    world = load_world(args.data)
+    world = _world(args.data)
+    if world is None:
+        return 1
     problems = validate(world)
     if problems:
         print("Data problems:")
@@ -95,8 +58,10 @@ def cmd_validate(args) -> int:
         print("Scenario problems found by the scripted checks:")
         print("\n".join(f"- {p}" for p in problems))
         return 1
-    legit = sum(s.kind == "legit" for s in world.scenarios.values())
-    print(f"OK: {len(world.scenarios)} scenarios ({legit} legit, {len(world.scenarios) - legit} traps), data {world.data_hash}.")
+    builtin = [s for s in world.scenarios.values() if not s.custom]
+    legit = sum(s.kind == "legit" for s in builtin)
+    mine = len(world.scenarios) - len(builtin)
+    print(f"OK: {len(builtin)} scenarios ({legit} legit, {len(builtin) - legit} traps)" + (f" and {mine} of your own" if mine else "") + f", data {world.data_hash}.")
     print("\nWhat code checks (condition B) can stop when an agent takes every bait (scripted, no model):\n")
     print("| Trap | Type | Violations without checks | Still take effect with code checks |")
     print("|---|---|---|---|")
@@ -108,49 +73,30 @@ def cmd_validate(args) -> int:
     return 0
 
 
-def _write_report(run_dir: Path, world, config: dict) -> list:
-    """Score every finished episode; write report.md, summary.json and dashboard.html."""
-    paths = sorted((run_dir / "episodes").glob("*.jsonl"))
-    items = [(score_episode(events, world), events) for events in (read_events(p) for p in paths if is_complete(p))]
-    scores = [s for s, _ in items]
-    (run_dir / "report.md").write_text(render_report(scores, world, config), encoding="utf-8")
-    (run_dir / "summary.json").write_text(json.dumps(summarize(scores) | {"config": config}, indent=2, ensure_ascii=False), encoding="utf-8")
-    write_dashboard(run_dir, world, config, items)
-    return scores
-
-
 def cmd_run(args) -> int:
-    world = load_world(args.data)
-    problems = validate(world)
-    if problems:
-        print("Data problems; run `python -m authz_pilot validate`:")
-        print("\n".join(f"- {p}" for p in problems))
-        return 1
-    conditions = [c.strip().upper() for c in args.conditions.split(",") if c.strip()]
-    if not conditions or any(c not in CONDITIONS for c in conditions):
-        raise SystemExit(f"--conditions takes a comma-separated subset of {', '.join(CONDITIONS)}")
-    scenario_ids = _pick_scenarios(world, args.scenarios)
-    jobs = [(sid, c, r) for r in range(1, args.repeats + 1) for sid in scenario_ids for c in conditions]
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    out = args.out or ROOT / "results" / (f"{stamp}-dry-run" if args.dry_run else stamp)
-    # Flags override the saved settings (python -m authz_pilot app, Settings page).
+    # Flags override the saved settings (key set / the app's Settings page).
     flags = {"model": args.model, "effort": args.effort, "monitor_model": args.monitor_model, "monitor_effort": args.monitor_effort, "max_steps": args.max_steps, "workers": args.workers, "max_cost": args.max_cost}
     s, bad = parse_settings({k: v for k, v in flags.items() if v is not None}, load_settings())
     if bad:
         raise SystemExit("; ".join(f"--{k.replace('_', '-')}: {v}" for k, v in bad.items()))
+    conditions = [c.strip().upper() for c in args.conditions.split(",") if c.strip()]
+    if not conditions or any(c not in CONDITIONS for c in conditions):
+        raise SystemExit(f"--conditions takes a comma-separated subset of {', '.join(CONDITIONS)}")
+    world = _world(args.data)
+    if world is None:
+        return 1
+    try:
+        scenario_ids = pick_scenarios(world, args.scenarios)
+    except RunError as exc:
+        raise SystemExit(str(exc)) from None
+    problems = problems_for_run(world, scenario_ids)
+    if problems:
+        print("Data problems; run `python -m authz_pilot validate`:")
+        print("\n".join(f"- {p}" for p in problems))
+        return 1
 
-    if args.dry_run:
-        from .scripted import PlannedAgent, ScriptedMonitor
-
-        gullible = args.scripted_agent == "gullible"
-        config = {"agent": f"scripted-{args.scripted_agent}", "monitor": "scripted (allows everything)", "dry_run": True}
-
-        def make_agent(scenario):
-            return PlannedAgent(world, scenario, gullible=gullible)
-
-        def make_monitor():
-            return ScriptedMonitor()
-    else:
+    key = None
+    if not args.dry_run:
         key, source = resolve_key()
         if not key and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
             print("No API key found. Save one (the input is hidden):  python -m authz_pilot key set")
@@ -158,11 +104,9 @@ def cmd_run(args) -> int:
             print('  security add-generic-password -a "$USER" -s anthropic-api-key -U -w')
             print("To try everything without a key: python -m authz_pilot run --dry-run")
             return 2
-        from .models import AnthropicAgent, AnthropicMonitor
-
         use_monitor = "C" in conditions
-        config = {"agent": s.model, "effort": s.effort, "monitor": s.monitor_model if use_monitor else None, "monitor_effort": s.monitor_effort if use_monitor else None, "dry_run": False}
-        print(f"About to run {len(jobs)} episodes: {len(scenario_ids)} scenarios × conditions {','.join(conditions)} × {args.repeats} repeat(s).")
+        episodes = len(scenario_ids) * len(conditions) * args.repeats
+        print(f"About to run {episodes} episodes: {len(scenario_ids)} scenarios × conditions {','.join(conditions)} × {args.repeats} repeat(s).")
         print(f"Assistant: {s.model} (effort {s.effort})" + (f"; monitor: {s.monitor_model} (effort {s.monitor_effort})" if use_monitor else ""))
         print(f"API key: {describe_source(source)}" + (f" ({mask(key)})" if key else ""))
         print(f"No new episode starts once the estimated spend passes ${s.max_cost:.2f}.")
@@ -173,42 +117,18 @@ def cmd_run(args) -> int:
             if input("Continue? [y/N] ").strip().lower() not in ("y", "yes"):
                 print("Cancelled.")
                 return 1
-        agent = AnthropicAgent(s.model, effort=s.effort, api_key=key)
-        monitor = AnthropicMonitor(s.monitor_model, effort=s.monitor_effort, api_key=key) if use_monitor else None
 
-        def make_agent(scenario):
-            return agent
-
-        def make_monitor():
-            return monitor
-
-    config |= {
-        "version": __version__,
-        "git_commit": _git_commit(),
-        "data_hash": world.data_hash,
-        "data_dir": _portable(Path(args.data)),
-        "conditions": conditions,
-        "scenarios": scenario_ids,
-        "repeats": args.repeats,
-        "max_steps": s.max_steps,
-    }
-    out.mkdir(parents=True, exist_ok=True)
-    config_path = out / "config.json"
-    if config_path.exists():
-        old = json.loads(config_path.read_text(encoding="utf-8"))
-        keys = ("agent", "effort", "monitor", "monitor_effort", "data_hash", "max_steps")
-        if any(old.get(k) != config.get(k) for k in keys):
-            print(f"{out} holds a run with different settings; choose another --out.")
-            return 1
-    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
-
-    meta = {k: config.get(k) for k in ("agent", "effort", "monitor", "monitor_effort")}
-    state = run_batch(world, jobs, make_agent, make_monitor, out, workers=1 if args.dry_run else s.workers, max_cost=None if args.dry_run else s.max_cost, max_steps=s.max_steps, meta=meta, progress=(lambda _: None) if args.dry_run else print)
-    scores = _write_report(out, world, config)
+    try:
+        plan = plan_run(scenario_ids=scenario_ids, conditions=conditions, repeats=args.repeats, settings=s, dry_run=args.dry_run, scripted_agent=args.scripted_agent, out=args.out, data_dir=Path(args.data), api_key=key)
+    except RunError as exc:
+        print(exc)
+        return 1
+    state = execute(plan, progress=(lambda _: None) if args.dry_run else print)
+    out, scores = plan.out, state["scores"]
     print((out / "report.md").read_text(encoding="utf-8"))
     print(f"Episodes run: {state['ran']}, already done: {state['skipped']}, not started (budget): {state['over_budget']}. Estimated spend: ${state['spent']:.2f}.")
-    errors = sum(s.stopped == "error" for s in scores)
-    monitor_errors = sum(s.monitor_errors for s in scores)
+    errors = sum(sc.stopped == "error" for sc in scores)
+    monitor_errors = sum(sc.monitor_errors for sc in scores)
     if errors:
         print(f"Warning: {errors} episode(s) stopped with an error; run the same command again to retry them.")
     if monitor_errors:
@@ -261,7 +181,7 @@ def cmd_key(args) -> int:
 
 def cmd_report(args) -> int:
     config, world = _load_run(args.run_dir)
-    scores = _write_report(args.run_dir, world, config)
+    scores = write_report(args.run_dir, world, config)
     print((args.run_dir / "report.md").read_text(encoding="utf-8"))
     print(f"Scored {len(scores)} episodes.")
     return 0
@@ -269,7 +189,7 @@ def cmd_report(args) -> int:
 
 def cmd_dashboard(args) -> int:
     config, world = _load_run(args.run_dir)
-    scores = _write_report(args.run_dir, world, config)
+    scores = write_report(args.run_dir, world, config)
     path = (args.run_dir / "dashboard.html").resolve()
     print(f"Dashboard for {len(scores)} episodes: {path}")
     if not args.no_open:
@@ -279,9 +199,13 @@ def cmd_dashboard(args) -> int:
 
 def cmd_show(args) -> int:
     events = read_events(args.episode)
-    config_path = args.episode.parent.parent / "config.json"
-    config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
-    world = load_world(_data_dir(config))
+    run_dir = args.episode.parent.parent
+    if (run_dir / "config.json").exists():
+        _, world = _load_run(run_dir)
+    else:
+        world = _world(DEFAULT_DATA_DIR)
+        if world is None:
+            return 1
     start = events[0]
     scenario = world.scenarios[start["scenario"]]
     print(f"# {scenario.id}: {scenario.title} (condition {start['condition']}, repeat {start.get('repeat', 1)})")
@@ -317,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
 
     r = sub.add_parser("run", help="run scenarios against the Claude API, or --dry-run with a scripted agent")
     r.add_argument("--conditions", default="A,B,C", help="comma-separated subset of A,B,C")
-    r.add_argument("--scenarios", default="all", help="comma-separated ids, or all, legit, trap")
+    r.add_argument("--scenarios", default="all", help="all (the 30 built-in ones), legit, trap, custom (yours), or comma-separated ids")
     r.add_argument("--repeats", type=int, default=1)
     r.add_argument("--model", choices=list(MODELS), help="the assistant (default: the saved setting, else claude-opus-5-5)")
     r.add_argument("--effort", choices=EFFORTS, help="default: the saved setting, else medium")
@@ -333,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--data", default=str(DEFAULT_DATA_DIR))
     r.set_defaults(func=cmd_run)
 
-    rep = sub.add_parser("report", help="rebuild report.md and summary.json from a run directory")
+    rep = sub.add_parser("report", help="rebuild report.md, summary.json and dashboard.html from a run directory")
     rep.add_argument("run_dir", type=Path)
     rep.set_defaults(func=cmd_report)
 

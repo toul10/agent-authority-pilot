@@ -7,13 +7,26 @@ Everything here is fictional: an invented company, invented people and reserved
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import tomllib
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
-DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
+CUSTOM_ID = re.compile(r"^U\d{2,}$")  # your own scenarios: U01, U02, ...
+
+
+def custom_path() -> Path:
+    """Your own scenarios, written in the app or by hand. AUTHZ_PILOT_CUSTOM moves the file."""
+    override = os.environ.get("AUTHZ_PILOT_CUSTOM")
+    return Path(override).expanduser() if override else PROJECT_ROOT / "custom" / "scenarios.toml"
+
+
+class CustomScenarioError(ValueError):
+    """The file with your own scenarios cannot be used."""
 
 TRAP_TYPES = ("injection", "false_authority", "cross_context", "permission_change")
 EXPECT_TYPES = ("reply", "email", "approve")
@@ -127,6 +140,7 @@ class Scenario:
     inject: tuple[tuple[str, str], ...] = ()  # (document id, text appended to it)
     extra_documents: tuple[Document, ...] = ()
     extra_requests: tuple[Request, ...] = ()
+    custom: bool = False  # written by the user, not one of the built-in scenarios
 
 
 @dataclass
@@ -138,7 +152,8 @@ class World:
     documents: dict[str, Document]
     requests: dict[str, Request]
     scenarios: dict[str, Scenario]
-    data_hash: str = ""
+    data_hash: str = ""  # the built-in data files
+    custom_hash: str = ""  # the custom scenario file, if one was loaded
 
     def person_by_email(self, address: str) -> Person | None:
         address = address.strip().casefold()
@@ -250,7 +265,7 @@ def _turn(raw: dict) -> Turn:
     )
 
 
-def _scenario(raw: dict) -> Scenario:
+def _scenario(raw: dict, custom: bool = False) -> Scenario:
     return Scenario(
         id=raw["id"],
         kind=raw["kind"],
@@ -261,16 +276,41 @@ def _scenario(raw: dict) -> Scenario:
         inject=tuple((i["document"], i["text"]) for i in raw.get("inject", [])),
         extra_documents=tuple(_document(d) for d in raw.get("document", [])),
         extra_requests=tuple(_request(r) for r in raw.get("request", [])),
+        custom=custom,
     )
 
 
-def load_world(data_dir: Path | str = DEFAULT_DATA_DIR) -> World:
+def _custom_scenarios(path: Path, taken: set[str]) -> tuple[list[Scenario], bytes]:
+    data = path.read_bytes()
+    try:
+        raws = tomllib.loads(data.decode("utf-8")).get("scenario", [])
+        scenarios = [_scenario(raw, custom=True) for raw in raws]
+    except KeyError as exc:
+        raise CustomScenarioError(f"{path}: a scenario is missing the field {exc}") from exc
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError, TypeError, AttributeError) as exc:
+        raise CustomScenarioError(f"{path}: {exc}") from exc
+    for sc in scenarios:
+        if not CUSTOM_ID.match(sc.id):
+            raise CustomScenarioError(f"{path}: scenario id {sc.id!r} must look like U01")
+        if sc.id in taken:
+            raise CustomScenarioError(f"{path}: scenario id {sc.id} is used twice")
+        taken.add(sc.id)
+    return scenarios, data
+
+
+def load_world(data_dir: Path | str = DEFAULT_DATA_DIR, custom: Path | str | None = None) -> World:
+    """The built-in world and scenarios, plus your own scenarios from `custom` if that file exists."""
     data_dir = Path(data_dir)
     world_bytes = (data_dir / "world.toml").read_bytes()
     scenario_bytes = (data_dir / "scenarios.toml").read_bytes()
     w = tomllib.loads(world_bytes.decode("utf-8"))
     s = tomllib.loads(scenario_bytes.decode("utf-8"))
     scenarios = [_scenario(raw) for raw in s["scenario"]]
+    custom_hash = ""
+    if custom is not None and Path(custom).is_file():
+        extra, custom_bytes = _custom_scenarios(Path(custom), {sc.id for sc in scenarios})
+        scenarios += extra
+        custom_hash = hashlib.sha256(custom_bytes).hexdigest()[:12] if extra else ""
     return World(
         company=w["company"],
         roles=w["roles"],
@@ -280,6 +320,7 @@ def load_world(data_dir: Path | str = DEFAULT_DATA_DIR) -> World:
         requests={r["id"]: _request(r) for r in w["requests"]},
         scenarios={sc.id: sc for sc in scenarios},
         data_hash=hashlib.sha256(world_bytes + b"\0" + scenario_bytes).hexdigest()[:12],
+        custom_hash=custom_hash,
     )
 
 
