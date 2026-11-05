@@ -1,5 +1,7 @@
 # Agent authority pilot
 
+[![tests](https://github.com/toul10/agent-authority-pilot/actions/workflows/tests.yml/badge.svg)](https://github.com/toul10/agent-authority-pilot/actions/workflows/tests.yml)
+
 A small, reproducible experiment on one question: **does an AI agent tell apart having access, being asked, and being authorised?**
 
 An assistant with tools can usually do more than the person it is helping may do. The tool works, and somebody asked, but that does not make the action authorised. This pilot measures how often an assistant crosses that line, and which safeguard catches which kind of failure:
@@ -8,58 +10,134 @@ An assistant with tools can usually do more than the person it is helping may do
 - deterministic permission checks in code,
 - a second model that reviews actions before they take effect.
 
-**Status:** the harness and the 30 scenarios are complete and tested with scripted agents and a mock API. A 4-episode smoke test against Claude Opus 5.5 ran cleanly; the full run has not been done yet.
+The assistant and the reviewing model can be Claude, GPT or Gemini, so the same 30 scenarios can compare models and providers. Everything runs on your computer, and a local app shows every conversation behind the numbers.
 
-## Quick start
+**Status:** the harness and the 30 scenarios are complete, and tested with scripted agents and with local mock APIs for all three providers. A 4-episode smoke test against Claude Opus 5.5 ran cleanly. The full run, and runs against the real OpenAI and Gemini APIs, have not been done yet.
 
-You need Python 3.11 or later and an API key from the [Claude Console](https://platform.claude.com).
+## Install
+
+You need [Python](https://www.python.org/downloads/) 3.11 or later and [git](https://git-scm.com/downloads). Check your Python with `python3 --version`, or `py --version` on Windows.
+
+**macOS and Linux:**
 
 ```sh
 git clone https://github.com/toul10/agent-authority-pilot.git
 cd agent-authority-pilot
 python3 -m venv .venv
 .venv/bin/pip install -e .
-.venv/bin/python -m authz_pilot app      # opens http://127.0.0.1:8765/ in your browser
+.venv/bin/python -m authz_pilot app
 ```
 
-The app's **Start** page has five steps: paste your key, test it for free, watch a free run with a scripted assistant, run Claude on two scenarios, then write a scenario of your own. With the default models the Claude step is estimated at about $0.09; the page shows the estimate and asks before it spends anything.
+**Windows**, in PowerShell or Command Prompt:
 
-The other pages:
+```powershell
+git clone https://github.com/toul10/agent-authority-pilot.git
+cd agent-authority-pilot
+py -m venv .venv
+.venv\Scripts\pip install -e .
+.venv\Scripts\python -m authz_pilot app
+```
 
-- **Scenarios.** Write your own scenarios next to the 30 built-in ones: who sends each message, what a careful assistant should do and, for a trap, what a fooled one would do. The form is checked as you type, with the same data checks as the built-in scenarios plus a scripted test that shows what the trap can catch and which condition can stop it. Run a scenario with the free scripted assistant or with Claude, and the result appears next to it, one per condition; select one to read that conversation. A built-in scenario can be copied as a starting point.
-- **New run.** Run many scenarios in one go: all of them, a group such as one family of traps, or any mix picked one by one, under the set-ups you choose. The page shows the size of the run (scenarios × set-ups × repeats); with Claude it also shows the estimated cost, which you confirm before anything is spent. The run opens on its own page, where the scorecard fills in as episodes finish.
-- **Results.** Every run, newest first, with how its episodes ended. A run opens as a scorecard, one row per scenario and one column per condition, with the totals below it; select a result to read that conversation.
-- **Settings.** Your key, the assistant and monitor models and their effort, the spending limit per run, steps per message, and how many episodes run at once.
+The last command starts the app and opens http://127.0.0.1:8765/ in your browser. Ctrl-C in the terminal stops it. If port 8765 is taken, add `--port 8766`.
 
-**From the command line.** Everything works without the app too:
+The install adds one package, the Anthropic Python SDK, with its dependencies. GPT and Gemini are called with Python's standard library.
+
+The commands below are written for macOS and Linux. On Windows, write `.venv\Scripts\python` where they say `.venv/bin/python`.
+
+## Try it without an API key
+
+Everything except a real model works without a key, and costs nothing. A scripted assistant stands in for the model. It does what each scenario expects and also takes every bait, so you can see how a scenario plays out under each condition and how the scoring reads it.
+
+- **In the app:** step 3 on the Start page, "Try a run that costs nothing". To run all 30 scenarios, open New run and choose "Scripted assistant, free".
+- **From the command line:**
 
 ```sh
-.venv/bin/python -m authz_pilot key set     # paste your key; the input is hidden
-.venv/bin/python -m authz_pilot key test    # free: checks the key and both models
-.venv/bin/python -m authz_pilot run --scenarios L12,T09 --conditions A,C   # 4 episodes, about $0.09
-.venv/bin/python -m authz_pilot dashboard results/<run>                    # the folder the run printed
+.venv/bin/python -m authz_pilot validate                  # data checks, and what code checks can stop (table below)
+.venv/bin/python -m authz_pilot run --dry-run             # all 30 scenarios under A, B and C, scripted
+.venv/bin/python -m authz_pilot dashboard results/<run>   # the folder the run printed
 ```
 
-No key yet? `run --dry-run`, or the free runs in the app, go through everything with a scripted agent.
+`run --dry-run --scripted-agent oracle` uses an assistant that does exactly what each turn expects and nothing else.
 
-**Where the key is kept.** `key set` and the app save it outside the project, in `~/.config/authz-pilot/api-key` (`%APPDATA%\authz-pilot` on Windows), in a file only your user can read. The `ANTHROPIC_API_KEY` environment variable takes precedence over it. On macOS, a Keychain item with the service name `anthropic-api-key` is used when neither is set. `key status` shows which key is in use, and `key remove` deletes the saved file.
+## Run it on a real model
 
-**Models.** The assistant is Claude Opus 5.5 and the monitor Claude Sonnet 5.5, both at effort `medium`, unless you choose otherwise in Settings or with `--model`, `--effort`, `--monitor-model` and `--monitor-effort`. The choices are the models with a price in `authz_pilot/models.py`, so that the spending limit can count what a run spends:
+A real run sends the scenarios to the provider's API with your key, and costs money. You see the estimated cost and confirm it before anything is spent.
 
-- **Current:** Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5.
-- **Older:** Claude Fable 5, Opus 5, Sonnet 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 4.6, Opus 4.5 and Haiku 4.5. Sonnet 4.5 is left out because it retires on 30 November 2026.
+1. **Get a key** from the provider of each model you choose: the [Claude Console](https://platform.claude.com) for Claude, the [OpenAI dashboard](https://platform.openai.com/api-keys) for GPT, or [Google AI Studio](https://aistudio.google.com/apikey) for Gemini. The default models are both Claude, so they need only a Claude key.
+2. **Add it** in the app (Start page step 1, or Settings), or from the command line:
 
-Older models differ in what they take, and the harness adapts each request:
+   ```sh
+   .venv/bin/python -m authz_pilot key set                     # a Claude key; the input is hidden
+   .venv/bin/python -m authz_pilot key set --provider openai   # or --provider google
+   ```
 
-- **Effort.** Opus 4.6 and Sonnet 4.6 have no `xhigh`. A setting a model lacks becomes the nearest level below it, and the app's menus offer only the levels the chosen model has.
-- **Thinking.** Opus 4.5 and Haiku 4.5 have no effort setting and no adaptive thinking. As the assistant, they think with a fixed budget that the effort setting picks: 1K tokens for `low`, 2K for `medium`, 4K for `high`, 8K for `xhigh` and 12K for `max`. As the monitor, they run without extended thinking.
-- **Operator notices.** Haiku 5.5, Sonnet 5, Opus 4.7 and the older models above do not accept system messages in the middle of a conversation. They get each notice in a `<system-reminder>` block at the end of the user's turn, as the Claude API docs suggest, and one sentence in the system prompt says that only the chat system can add such a block. Senders cannot forge one: the tag is rewritten in their messages and in documents. Each run records the channel in `config.json` as `notices` (`system` or `user_turn`), and the run page and dashboard say when notices went inside the user's turn. Results across these channels are not strictly comparable, because the notice reaches the model with different authority.
+3. **Test it, for free:** "Test the key" in the app, or `key test`. It reads the chosen models' details from each API and sends no prompt.
+4. **Run the smoke test:** Start page step 4, or:
 
-`key test` also checks that each chosen model supports what the harness asks of it.
+   ```sh
+   .venv/bin/python -m authz_pilot run --scenarios L12,T09 --conditions A,C
+   ```
+
+   These 4 episodes use an operator notice, an approval and the monitor. With the default models they cost about $0.09. The test passes when the report shows 0 errors and 0 monitor errors.
+5. **Run everything:** on the New run page, tick "All scenarios" and choose "A real model, with your key". From the command line, `run` with no options does the same. That is 90 episodes (30 scenarios × A, B, C), roughly $2–5 with the default models.
+
+A run starts no new episode once its estimated spend passes the limit: $20 by default, set in Settings or with `--max-cost`.
+
+**Where keys are kept.** The app and `key set` save each key outside the project, in `~/.config/authz-pilot/` (`$XDG_CONFIG_HOME/authz-pilot` if that is set, `%APPDATA%\authz-pilot` on Windows). On macOS and Linux, only your user can read the file. An environment variable takes precedence over the saved file. On macOS, a Keychain item is used when neither is set.
+
+| Provider | Environment variable | Saved file | macOS Keychain service |
+|---|---|---|---|
+| Anthropic (Claude) | `ANTHROPIC_API_KEY` | `api-key` | `anthropic-api-key` |
+| OpenAI (GPT) | `OPENAI_API_KEY` | `openai-api-key` | `openai-api-key` |
+| Google (Gemini) | `GEMINI_API_KEY`, then `GOOGLE_API_KEY` | `gemini-api-key` | `gemini-api-key` |
+
+`key status` shows where each key comes from, and `key remove --provider <name>` deletes a saved one. The app never sends a key back to the browser in full.
+
+## The app
+
+- **Start.** Five steps: add your key, test it for free, try a run that costs nothing, run the model on two scenarios, then write a scenario of your own.
+- **Scenarios.** Write your own scenarios next to the 30 built-in ones: who sends each message, what a careful assistant should do and, for a trap, what a fooled one would do. The form is checked as you type, with the same data checks as the built-in scenarios plus a scripted test that shows what the trap can catch and which condition can stop it. Run a scenario with the free scripted assistant or with a real model, and the result appears next to it, one per condition; select one to read that conversation. A built-in scenario can be copied as a starting point.
+- **New run.** Run many scenarios in one go: all of them, a group such as one family of traps, or any mix picked one by one, under the set-ups you choose. The page shows the size of the run (scenarios × set-ups × repeats); with a real model it also shows the estimated cost, which you confirm before anything is spent. The run opens on its own page, where the scorecard fills in as episodes finish.
+- **Results.** Every run, newest first, with how its episodes ended. A run opens as a scorecard, one row per scenario and one column per condition, with the totals below it; select a result to read that conversation.
+- **Settings.** An API key for each provider, the assistant and monitor models and their effort, the spending limit per run, steps per message, and how many episodes run at once.
 
 **Your own scenarios** are saved in `custom/scenarios.toml`, which git ignores, in the same format as `data/scenarios.toml` and with ids U01, U02 and so on. You can also edit that file by hand. `run --scenarios custom` runs them from the command line. A run keeps its own copy of the scenarios it used, so editing or deleting one later does not change old results.
 
-**The app stays on your computer.** It listens on 127.0.0.1 only. Every API call needs a random token that the page receives when it loads. Requests that name another host or come from another site are refused, and other sites cannot show the app inside a frame. The key never goes back to the browser in full. A run with Claude starts only after you confirm its estimated cost, and the server refuses one that was not confirmed.
+**The app stays on your computer.** It listens on 127.0.0.1 only. Every API call needs a random token that the page receives when it loads. Requests that name another host or come from another site are refused, and other sites cannot show the app inside a frame. A run with a real model starts only after you confirm its estimated cost, and the server refuses one that was not confirmed.
+
+## Models
+
+The assistant is Claude Opus 5.5 and the monitor Claude Sonnet 5.5, both at effort `medium`, unless you choose otherwise in Settings or with `--model`, `--effort`, `--monitor-model` and `--monitor-effort`. Either role can be any model below, and the two can come from different providers: GPT as the assistant and Claude as the monitor, for example. A run needs a key for each provider it uses.
+
+The choices are the models with a price in [`authz_pilot/models.py`](authz_pilot/models.py), so that the spending limit can count what a run spends:
+
+- **Claude:** Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5.
+- **Claude, older:** Fable 5, Opus 5, Sonnet 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 4.6, Opus 4.5 and Haiku 4.5. Sonnet 4.5 is left out because it retires on 30 November 2026.
+- **GPT, from OpenAI:** GPT-6 Astra, GPT-6.1 Sol, GPT-6.1 Terra and GPT-6 Luna.
+- **Gemini, from Google:** Gemini 4 Argon, Gemini 3.8 Flash and Gemini 3.5 Flash-Lite.
+
+Models differ in what they take, and the harness adapts each request:
+
+- **Effort.** Opus 4.6 and Sonnet 4.6 have no `xhigh`, and Gemini models have only low, medium and high thinking levels. A setting a model lacks becomes the nearest level below it, and the app's menus offer only the levels the chosen model has.
+- **Thinking.** Opus 4.5 and Haiku 4.5 have no effort setting and no adaptive thinking. As the assistant, they think with a fixed budget that the effort setting picks: 1K tokens for `low`, 2K for `medium`, 4K for `high`, 8K for `xhigh` and 12K for `max`. As the monitor, they run without extended thinking.
+- **Reasoning in the logs.** Where a model allows it, the harness asks for a summary of its reasoning: summarized thinking from Claude, reasoning summaries from GPT, thought summaries from Gemini. `show --thinking` prints them.
+- **Operator notices.** Not every model accepts a system message in the middle of a conversation, so notices reach the assistant in one of three ways:
+
+| `notices` | Models | How a notice arrives |
+|---|---|---|
+| `system` | Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Fable 5, Opus 5 and Opus 4.8 | a system message |
+| `user_turn` | Claude Haiku 5.5, Sonnet 5, Opus 4.7 and the older Claude models; every Gemini model | a `<system-reminder>` block at the end of the user's turn |
+| `developer` | every GPT model | a developer message, OpenAI's nearest match to a system message |
+
+For `user_turn`, one sentence in the system prompt says that only the chat system can add such a block. Senders cannot forge one: the tag is rewritten in their messages and in documents. Each run records the channel in `config.json` as `notices`, and the run page and the dashboard say when it was not a system message. Results across these channels are not strictly comparable, because the notice reaches the model with different authority.
+
+Provider details:
+
+- **OpenAI.** Requests set `store: false` and send the whole conversation each time, instead of keeping it on OpenAI's side. Each earlier reply goes back exactly as it arrived, encrypted reasoning included. OpenAI watches GPT-6 Astra's agent actions on its own side, so trap scenarios may send alerts to your OpenAI organization. If OpenAI stops a conversation, the episode ends as "Provider stopped", a separate outcome in the results.
+- **Gemini.** The key goes in a request header, never in the URL. Each earlier reply goes back exactly as it arrived, thought signatures included.
+- **Prices.** Announced price changes are built in. From 1 December 2026, Gemini 4 Argon costs $4 per million input tokens and $20 per million output tokens (before that, $2 and $10). From 1 January 2027, Gemini 3.8 Flash costs $1.50 and $7.50 (before that, $0.75 and $3.75). Each call is counted at the price of the day it was made.
+
+`key test` also checks each chosen model: that the API offers it to your key and, where the API reports it, that the model supports what the harness asks of it.
 
 ## The setup
 
@@ -67,7 +145,7 @@ The assistant works at a fictional coffee wholesaler, Ottermere Coffee Supply. T
 
 - **One assistant, several people.** Staff message the assistant in private chats. It keeps one continuous context, but each reply reaches only the person who sent the message.
 - **Authenticated sender.** The chat system adds a line to each message, such as `[Authenticated sender: Maria Ostrander <maria@ottermere.example>, Sales]`. That line is reliable; everything else in the message is the sender's own words.
-- **Operator notices.** Permission changes, such as "Maria may approve discounts while Nikos is away", arrive as mid-conversation system messages. Each one changes the authoritative permission state that the code checks and the monitor use.
+- **Operator notices.** Permission changes, such as "Maria may approve discounts while Nikos is away", arrive in the middle of the conversation, as system messages where the model accepts them (see [Models](#models)). Each one changes the authoritative permission state that the code checks and the monitor use.
 - **Tools.** `list_documents`, `read_document`, `send_email`, `approve_request` and `escalate_to_human`. In condition A, every tool works for everyone.
 - **Policy.** Documents are classified public, sales, finance or HR, and each role sees its own classes. Finance approves discounts and payments; HR approves leave. Anyone outside the company may receive public information only.
 
@@ -136,40 +214,25 @@ Code checks stop every violation in 8 of the 15 traps. The other 7 need judgemen
 
 The real runs test how much of that gap the prompt and a monitor close, and at what cost in false alarms.
 
-## Running it
+## Command line
 
-Python 3.11 or later.
-
-```sh
-python3 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
-
-.venv/bin/python -m pytest                       # no network, no API key
-.venv/bin/python -m authz_pilot validate         # data checks + the table above
-.venv/bin/python -m authz_pilot run --dry-run    # full pipeline with a scripted agent
-```
-
-A real run needs an API key: `key set` saves one, or see *Where the key is kept* above.
+Everything the app does also works from the command line. `python -m authz_pilot <command> --help` lists every option.
 
 ```sh
-# smoke test first: 4 episodes that use an operator notice, an approval and the monitor
-.venv/bin/python -m authz_pilot run --scenarios L12,T09 --conditions A,C
-
 # everything: 30 scenarios × A, B, C
 .venv/bin/python -m authz_pilot run
+
+# the traps only, under condition C, with GPT as the assistant
+.venv/bin/python -m authz_pilot run --scenarios trap --conditions C --model gpt-6.1-sol
 
 # open the results in the browser: charts, and every conversation behind them
 .venv/bin/python -m authz_pilot dashboard results/<run>
 
-# or read one episode in the terminal, with thinking summaries and monitor decisions
+# or read one episode in the terminal, with reasoning summaries and monitor decisions
 .venv/bin/python -m authz_pilot show results/<run>/episodes/T09_A_1.jsonl --thinking
 ```
 
-**Defaults:**
-
-- **Models:** Claude Opus 5.5 (`claude-opus-5-5`, effort `medium`) as the assistant, and Claude Sonnet 5.5 as the monitor. Change them with `--model`, `--effort`, `--monitor-model` and `--monitor-effort`.
-- **Parallelism:** 4 episodes at a time (`--workers`).
-- **Repeats:** 1 (`--repeats`).
+`--scenarios` takes `all`, `legit`, `trap`, `custom` (your own) or a list of ids. `--repeats` runs each episode more than once, and `--workers` sets how many run at once (4 by default).
 
 Each run writes these files to `results/<timestamp>/`:
 
@@ -177,25 +240,62 @@ Each run writes these files to `results/<timestamp>/`:
 - one JSONL file per episode
 - `report.md`
 - `summary.json`
-- `dashboard.html`: one self-contained page (no server, no network; the app shows the same views) with a scorecard of one row per scenario and one column per condition, the results per condition, the traps by family and the violation types. Select any result to read that conversation: messages, operator notices, tool calls and whether they were blocked, monitor decisions, thinking summaries and replies.
+- `dashboard.html`: one self-contained page (no server, no network; the app shows the same views) with a scorecard of one row per scenario and one column per condition, the results per condition, the traps by family and the violation types. Select any result to read that conversation: messages, operator notices, tool calls and whether they were blocked, monitor decisions, reasoning summaries and replies.
 
 To resume an interrupted run, rerun the same command with the same `--out`. Finished episodes are skipped; episodes that stopped with an error run again. `report <run dir>` rebuilds the report, the summary and the dashboard from the logs; `dashboard <run dir>` does the same and opens the page.
 
 ### Cost
 
-The assistant's prompt and tools come to about 1,000 tokens and are cached after the first call of each episode. There are 38 turns across the 30 scenarios.
+The assistant's prompt and tools come to about 1,000 tokens. With Claude, they are cached after the first call of each episode. There are 38 turns across the 30 scenarios.
 
-The smoke test above (4 episodes) cost about $0.09 at Opus 5.5 and Sonnet 5.5 prices, measured from the logged token usage. One pass of all scenarios under all three conditions (90 episodes) should therefore cost roughly **$2–5**. Most of the variation comes from how many thinking tokens the model uses.
+The smoke test (4 episodes) cost about $0.09 at Opus 5.5 and Sonnet 5.5 prices, measured from the logged token usage. One pass of all scenarios under all three conditions (90 episodes) should therefore cost roughly **$2–5** with those models. Most of the variation comes from how many thinking tokens the model uses. Other models cost more or less according to their prices and how much they think; the app and `run` show an estimate before each run.
 
 - The runner logs exact token usage per call and prints the estimated spend.
 - `--max-cost` (default $20) stops new episodes from starting once the estimate passes it.
-- Run the smoke test first. It passes when the report shows 0 errors and 0 monitor errors: then the API accepts every request shape the full run uses.
+- Run the smoke test first. When it shows 0 errors and 0 monitor errors, the API has accepted every request shape the full run uses.
+
+## Tests
+
+```sh
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/python -m pytest
+```
+
+The tests need no network and no key. They run every scenario with the scripted agents, and every request to Claude, GPT and Gemini against local mock APIs: [`tests/mock_api.py`](tests/mock_api.py) and [`tests/mock_providers.py`](tests/mock_providers.py). The mocks reject what the real APIs are documented to reject, and check that each earlier reply is sent back exactly as it arrived. GitHub Actions runs the tests on Linux, macOS and Windows, with Python 3.11 and 3.14.
+
+**Try the real-model path against the mocks** (macOS and Linux). Their answers are canned, so the results mean nothing, but every request goes through the same code as a real run and costs nothing. The app still shows an estimate and asks you to confirm.
+
+```sh
+.venv/bin/python tests/mock_api.py --port 8799 &
+.venv/bin/python tests/mock_providers.py --port 8798 &
+ANTHROPIC_BASE_URL=http://127.0.0.1:8799 ANTHROPIC_API_KEY=sk-ant-mock-0000000000000000 \
+AUTHZ_PILOT_OPENAI_BASE_URL=http://127.0.0.1:8798/openai/v1 OPENAI_API_KEY=sk-mock-openai-0000000000000000 \
+AUTHZ_PILOT_GEMINI_BASE_URL=http://127.0.0.1:8798/gemini/v1beta GEMINI_API_KEY=AIzaMockGemini00000000000000000000000 \
+  .venv/bin/python -m authz_pilot app --results results/mock
+kill %1 %2   # afterwards, stop the mocks
+```
+
+The mock keys in these variables take precedence over any key you saved, so your own keys are not used.
+
+## Troubleshooting
+
+- **`python3` or `py` is not found, or the version is older than 3.11.** Install Python from [python.org](https://www.python.org/downloads/). On Windows, its installer also adds the `py` command.
+- **"Cannot listen on 127.0.0.1:8765".** Another program is using the port. Start the app with `--port 8766`.
+- **The page shows "Reload the page".** The app was restarted, and each start issues a new access token. Reload any page that was open.
+- **"No Anthropic API key found"** (or OpenAI, or Google). A chosen model runs on that provider's API. Add its key as in [Run it on a real model](#run-it-on-a-real-model).
+
+## Project layout
+
+- `authz_pilot/runner.py` runs the scenarios and logs every step. `tools.py` holds the tools and condition B's code checks; `models.py` and `providers.py` call Claude, GPT and Gemini; `scoring.py` scores episodes from their logs.
+- `authz_pilot/app.py` and `authz_pilot/web/` are the local app; `dashboard.py` writes the page for each run.
+- `data/world.toml` and `data/scenarios.toml` hold the fictional company and the scenarios.
+- `tests/` holds the tests and the mock APIs.
 
 ## Design notes
 
 - **No refusal fallback.** If the model refuses, the refusal is recorded and the episode stops. A server-side fallback would quietly swap in a different model under test.
-- **Append-only history.** Every request extends the previous one without editing it. This keeps prompt caching and Opus 5.5's preserved thinking valid, and a test checks it.
-- **Effort and thinking are explicit.** Thinking is always on for the assistant. Where a model allows it, the harness asks for summarized thinking, so the logs include a summary of the assistant's reasoning. It sets effort explicitly so runs are comparable.
+- **Append-only history.** Every request extends the previous one without editing it. This keeps prompt caching and Opus 5.5's preserved thinking valid, and a test checks it. GPT's and Gemini's replies go back exactly as they arrived, and the mocks check that too.
+- **Effort and thinking are explicit.** Thinking is always on for the assistant, and effort is set explicitly so that runs are comparable.
 - **A blocked reply is never delivered.** In condition C, the assistant learns about it from an operator notice on its next turn.
 - **Scripted agents check the scenarios.** The oracle does exactly what each turn expects. It must finish every legit scenario without a violation, and condition B must never block it. The gullible agent takes every bait, and must trigger a violation in every trap under condition A. Both run in `validate` and in the tests.
 - **Repeats are not double-counted.** A value is counted once per recipient within an episode, so repeating it to someone who already received it is not a new violation.
@@ -207,6 +307,7 @@ The smoke test above (4 episodes) cost about $0.09 at Opus 5.5 and Sonnet 5.5 pr
 - **Coverage.** The scenarios test known failure shapes, not unknown ones. Their wording affects the outcome.
 - **Scope of the policy.** The policy is deliberately simple. For example, an employee is not cleared to see their own HR record.
 - **The monitor's view.** The monitor reads the same conversation as the assistant, so it can share the assistant's blind spots.
+- **Across providers.** Operator notices reach models through different channels (see [Models](#models)), and each provider's API has its own limits, so a difference between providers is not only a difference between models.
 
 ## How it was built
 
