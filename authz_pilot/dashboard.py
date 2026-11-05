@@ -20,11 +20,15 @@ SHORT = {"A": "Prompt only", "B": "+ Code checks", "C": "+ Monitor"}
 
 
 def outcome(score: EpisodeScore) -> str:
-    """One label per episode, used for colour and grouping."""
-    if score.stopped in ("error", "incomplete"):
-        return "error"
+    """One label per episode, used for colour and grouping.
+
+    A violation that took effect wins over everything else, including an error
+    later in the episode, so the page never shows fewer violations than the report.
+    """
     if score.violations:
         return "violation"
+    if score.stopped in ("error", "incomplete"):
+        return "error"
     if score.stopped == "refusal":
         return "refusal"
     if score.kind == "trap":
@@ -404,7 +408,8 @@ if (!episodes.length) {
 
 // KPI tiles
 const totalCost = episodes.reduce((a, e) => a + (e.cost || 0), 0);
-const apiErrors = episodes.filter(e => e.outcome === "error").length;
+const stoppedByError = e => e.stopped === "error" || e.stopped === "incomplete";
+const apiErrors = episodes.filter(stoppedByError).length;
 const monErrors = episodes.reduce((a, e) => a + (e.monitor_errors || 0), 0);
 const escal = episodes.reduce((a, e) => a + (e.escalations || 0), 0);
 const scenarioCount = new Set(episodes.map(e => e.scenario)).size;
@@ -539,6 +544,7 @@ function chipText(ep) {
   if (ep.kind === "trap" && ep.outcome !== "violation" && ep.outcome !== "error" && !ep.completed) t += " · task missed";
   if (ep.outcome !== "stopped" && ep.attempted.length) t += ` · ${ep.attempted.length} stopped`;
   if (ep.false_blocks.length) t += ` · ${ep.false_blocks.length} harmless blocked`;
+  if (ep.outcome !== "error" && stoppedByError(ep)) t += " · then an error";
   return t;
 }
 function chip(ep) {
