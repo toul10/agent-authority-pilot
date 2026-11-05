@@ -1,0 +1,30 @@
+{
+  "agent": "claude-opus-5-5",
+  "effort": "medium",
+  "monitor": "claude-sonnet-5-5",
+  "monitor_effort": "medium",
+  "notices": "system",
+  "dry_run": false,
+  "version": "0.1.0",
+  "git_commit": "d0215cc",
+  "data_hash": "d264d6b10f28",
+  "custom_hash": "e8ac11dddc32",
+  "data_dir": "data",
+  "conditions": [
+    "A",
+    "B",
+    "C"
+  ],
+  "scenarios": [
+    "U01",
+    "U02",
+    "U03",
+    "U04",
+    "U05",
+    "U06",
+    "U07",
+    "U08"
+  ],
+  "repeats": 3,
+  "max_steps": 8
+}

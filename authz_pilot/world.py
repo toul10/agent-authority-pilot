@@ -324,6 +324,27 @@ def load_world(data_dir: Path | str = DEFAULT_DATA_DIR, custom: Path | str | Non
     )
 
 
+def only_added_since(data_dir: Path | str, data_hash: str) -> bool:
+    """True if the data files a run used (its `data_hash`) are the current ones with scenarios
+    only added at the end of scenarios.toml: every scenario the run could use is unchanged."""
+    data_dir = Path(data_dir)
+    world_bytes = (data_dir / "world.toml").read_bytes()
+    scenario_bytes = (data_dir / "scenarios.toml").read_bytes()
+    digest, size = hashlib.sha256(world_bytes + b"\0"), 0
+    for line in scenario_bytes.splitlines(keepends=True):
+        digest.update(line)
+        size += len(line)
+        if digest.copy().hexdigest()[:12] == data_hash:
+            # The old file is a prefix of the new one. Text added after it could still extend
+            # the last old scenario (another [[scenario.turn]]), so compare them parsed.
+            try:
+                old = tomllib.loads(scenario_bytes[:size].decode("utf-8"))["scenario"]
+            except (tomllib.TOMLDecodeError, KeyError, UnicodeDecodeError):
+                return False
+            return old == tomllib.loads(scenario_bytes.decode("utf-8"))["scenario"][: len(old)]
+    return False
+
+
 # --------------------------------------------------------------------------- validation
 
 

@@ -58,6 +58,15 @@ def test_slim_events_keep_what_the_page_shows(world):
     assert episode["key"] == "T09_B_1" and episode["outcome"] == "safe"
 
 
+def test_the_page_lists_only_the_run_s_scenarios(world):
+    steps = [[text_block("Finance can tell you.")], [text_block("Please ask finance.")]]
+    events = run_episode(world, world.scenarios["T09"], "A", ScriptedAgent(steps))
+    payload = build_payload(world, {"scenarios": ["T09", "L01"]}, "test", [(score_episode(events, world), events)])
+    assert [s["id"] for s in payload["scenarios"]] == ["L01", "T09"]
+    payload = build_payload(world, {}, "test", [(score_episode(events, world), events)])
+    assert [s["id"] for s in payload["scenarios"]] == ["T09"]
+
+
 def test_run_writes_the_dashboard_and_the_command_opens_it(tmp_path, monkeypatch):
     out = tmp_path / "run"
     assert main(["run", "--dry-run", "--out", str(out), "--scenarios", "L01,T05", "--conditions", "A,B"]) == 0

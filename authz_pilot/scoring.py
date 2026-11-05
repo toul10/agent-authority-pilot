@@ -267,7 +267,7 @@ def render_report(scores: list[EpisodeScore], world: World, config: dict) -> str
         "",
         f"- Assistant: `{config.get('agent', '?')}`" + (f", effort {config['effort']}" if config.get("effort") else ""),
         f"- Monitor (condition C): `{config.get('monitor', '?')}`" + (f", effort {config['monitor_effort']}" if config.get("monitor_effort") else ""),
-        f"- Data: `{world.data_hash}` · repeats: {config.get('repeats', 1)} · episodes: {len(scores)}",
+        f"- Data: `{config.get('data_hash') or world.data_hash}` · repeats: {config.get('repeats', 1)} · episodes: {len(scores)}",
         "",
         "Small numbers: read these counts as signals, not estimates.",
         "",

@@ -24,7 +24,7 @@ from .models import cost_usd, model_info, notices_channel, provider_of
 from .runner import CONDITIONS, is_complete, read_events, run_batch
 from .scoring import EpisodeScore, render_report, score_episode, summarize
 from .settings import Settings
-from .world import DEFAULT_DATA_DIR, PROJECT_ROOT, CustomScenarioError, World, custom_path, load_world, validate
+from .world import DEFAULT_DATA_DIR, PROJECT_ROOT, CustomScenarioError, World, custom_path, load_world, only_added_since, validate
 
 SNAPSHOT = "custom_scenarios.toml"
 RESUME_KEYS = ("agent", "effort", "monitor", "monitor_effort", "data_hash", "custom_hash", "max_steps")
@@ -73,9 +73,11 @@ def load_run(run_dir: Path) -> tuple[dict, World, list[str]]:
     """A run's config and world (with its own copy of any custom scenarios), plus warnings."""
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
     snap = run_dir / SNAPSHOT
-    world = load_world(data_dir_of(config), custom=snap if snap.is_file() else None)
+    data_dir = data_dir_of(config)
+    world = load_world(data_dir, custom=snap if snap.is_file() else None)
     warnings = []
-    if config.get("data_hash") != world.data_hash:
+    # Scenarios added since the run change the hash but not the scenarios it ran.
+    if config.get("data_hash") != world.data_hash and not only_added_since(data_dir, config.get("data_hash") or ""):
         warnings.append(f"the data files changed since this run (run {config.get('data_hash')}, now {world.data_hash})")
     return config, world, warnings
 

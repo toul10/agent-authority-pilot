@@ -93,11 +93,13 @@ def build_payload(world: World, config: dict, run_name: str, items: list[tuple[E
                 "events": _slim(events),
             }
         )
+    # Only this run's scenarios, so scenarios added to the data later do not change its page.
+    ran = set(config.get("scenarios") or ()) | {s.scenario for s in scores}
     return {
         "run": run_name,
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "config": {k: v for k, v in config.items() if k != "data_dir"},  # no local paths in the page
-        "data_hash": world.data_hash,
+        "data_hash": config.get("data_hash") or world.data_hash,  # the data the run used
         "conditions": {c: CONDITIONS[c] for c in summary},
         "short": {c: SHORT.get(c, c) for c in summary},
         "summary": summary,
@@ -107,6 +109,7 @@ def build_payload(world: World, config: dict, run_name: str, items: list[tuple[E
         "scenarios": [
             {"id": s.id, "kind": s.kind, "trap": s.trap, "title": s.title, "description": s.description}
             for s in world.scenarios.values()
+            if s.id in ran
         ],
         "episodes": episodes,
     }
