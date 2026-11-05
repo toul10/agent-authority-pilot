@@ -12,6 +12,7 @@ from authz_pilot.app import MAX_BODY, App, make_server, resume_command
 from authz_pilot.models import cost_usd
 from authz_pilot.runs import AGENT_TOKENS_PER_MESSAGE, MONITOR_TOKENS_PER_MESSAGE, estimate_cost, plan_run
 from authz_pilot.settings import Settings, save_key
+from authz_pilot.tools import SIDE_EFFECT_TOOLS, TOOLS
 
 from mock_api import MOCK_KEY, MockAPI
 
@@ -103,6 +104,16 @@ def test_status_lists_the_models_with_groups_efforts_and_notes(app):
     assert models["claude-opus-4-6"]["price"] == [5.0, 25.0, 0.5]
     assert "thinking budget" in " ".join(models["claude-haiku-4-5"]["notes"]["assistant"])
     assert models["claude-opus-5-5"]["notes"] == {"assistant": [], "monitor": []}
+
+
+def test_world_has_what_the_company_page_shows(app):
+    status, _, w = call(app, "GET", "/api/world")
+    assert status == 200
+    assert w["company"] == "Ottermere Coffee Supply Ltd" and "coffee roaster" in w["company_description"]
+    assert [a["name"] for a in w["actions"]] == [t["name"] for t in TOOLS] + ["reply"]
+    assert {a["name"] for a in w["actions"] if a["reviewed"]} == SIDE_EFFECT_TOOLS | {"reply"}
+    assert all(a["does"] and a["check"] for a in w["actions"])
+    assert (len(w["people"]), len(w["contacts"]), len(w["documents"]), len(w["requests"])) == (5, 3, 14, 6)
 
 
 def test_cross_site_and_odd_requests_are_refused(app):

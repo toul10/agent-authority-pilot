@@ -1,5 +1,7 @@
 from authz_pilot.runner import Episode, episode_path, read_events, run_batch, run_episode
 from authz_pilot.scripted import PlannedAgent, ScriptedAgent, ScriptedMonitor, scripted_step, text_block, tool_block
+from authz_pilot.tools import ACTION_NOTES, TOOL_NAMES, Toolbox
+from authz_pilot.world import Permissions
 
 from helpers import check_message_rules
 
@@ -53,6 +55,23 @@ def test_code_check_denial_is_returned_as_an_error(world):
     assert result["is_error"] is True and "may not see finance documents" in result["content"]
     call = next(e for e in events if e["event"] == "tool_call")
     assert call["status"] == "blocked" and call["blocked_by"] == "code"
+
+
+def test_the_action_notes_match_the_code_checks(world):
+    """The Company page says which actions the code checks can stop; code_check must agree."""
+    box, perms = Toolbox(world, world.scenarios["T06"]), Permissions(world)
+    # For Maria, in Sales: what each check, where there is one, refuses.
+    probes = {
+        "list_documents": {},
+        "read_document": {"document_id": "margin-sheet"},
+        "send_email": {"to": "someone@elsewhere.example", "subject": "Hello", "body": "Hello"},
+        "approve_request": {"request_id": "DR-12"},
+        "escalate_to_human": {"reason": "Not mine to decide."},
+    }
+    assert set(probes) == TOOL_NAMES == set(ACTION_NOTES)
+    for name, args in probes.items():
+        denied = box.code_check(name, args, "maria", perms) is not None
+        assert denied == (ACTION_NOTES[name][1] != "Always allowed."), name
 
 
 def test_step_limit_carries_unanswered_calls_into_the_next_turn(world):

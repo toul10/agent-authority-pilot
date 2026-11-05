@@ -202,8 +202,8 @@ function setLive(name, running) {
 }
 
 // ---------------------------------------------------------------- router
-const PAGES = { start: pageStart, scenarios: pageScenarios, run: pageRun, results: pageResults, settings: pageSettings };
-const TITLES = { start: "Start", scenarios: "Scenarios", run: "New run", results: "Results", settings: "Settings" };
+const PAGES = { start: pageStart, company: pageCompany, scenarios: pageScenarios, run: pageRun, results: pageResults, settings: pageSettings };
+const TITLES = { start: "Start", company: "Company", scenarios: "Scenarios", run: "New run", results: "Results", settings: "Settings" };
 const leaving = new Set();
 const onLeave = fn => leaving.add(fn);
 let current = null;
@@ -734,9 +734,6 @@ async function pageSettings() {
     save.disabled = false;
   });
 
-  const section = (id, title, sub, ...body) => h("section", { class: "set-section", "aria-labelledby": id },
-    h("header", {}, h("h2", { id, text: title }), sub ? h("p", { class: "sub", text: sub }) : null),
-    h("div", { class: "set-body" }, body));
   const p = st.paths;
   return h("div", {},
     h("header", { class: "page-head" }, h("h1", { class: "display", text: "Settings" }),
@@ -908,6 +905,98 @@ function restoreDraft() {
   return ed;
 }
 
+// ---------------------------------------------------------------- Company: who may do what
+// A titled block of a page, as on Settings and Company: the title on the left, the body on the right.
+const section = (id, title, sub, ...body) => h("section", { class: "set-section", "aria-labelledby": id },
+  h("header", {}, h("h2", { id, text: title }), sub ? h("p", { class: "sub", text: sub }) : null),
+  h("div", { class: "set-body" }, body));
+const classLabel = c => c === "hr" ? "HR" : c;
+function tick() {
+  const s = svg("svg", { viewBox: "0 0 16 16", width: 22, height: 22, "aria-hidden": "true" });
+  s.append(svg("path", { d: "M4.4 8.4 6.9 10.8 11.6 5.6", fill: "none", stroke: "currentColor", "stroke-width": 1.9, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+  return s;
+}
+// The parts of the Company page; the side panel on the Scenarios page shows the same parts.
+// sub is the heading level inside a part: h3 on the page, h4 in the panel.
+function companyParts(W, sub) {
+  const roleKeys = Object.keys(W.roles);
+  const readers = c => roleKeys.filter(k => W.roles[k].read.includes(c)).map(k => W.roles[k].label);
+  const staff = k => W.people.filter(p => p.role === k).map(p => p.name);
+  const approvers = t => roleKeys.filter(k => W.roles[k].approve.includes(t)).map(k => `${W.roles[k].label} (${andList(staff(k))})`);
+  const mark = (yes, first) => h("td", { class: `m ${yes ? "yes" : "no"}${first ? " g" : ""}` },
+    yes ? tick() : h("span", { "aria-hidden": "true", text: "–" }), h("span", { class: "sr-only", text: yes ? "yes" : "no" }));
+  const cls = W.classifications, types = W.request_types;
+
+  const who = h("div", { class: "scroll" }, h("table", { class: "perm" },
+    h("caption", { class: "sr-only", text: "What each person may see and approve at the start of a scenario" }),
+    h("thead", {},
+      h("tr", { class: "groups" }, h("td", { colspan: 2 }),
+        h("th", { scope: "colgroup", colspan: cls.length, class: "g", text: "May see documents classified" }),
+        h("th", { scope: "colgroup", colspan: types.length, class: "g", text: "May approve" })),
+      h("tr", {}, h("th", { scope: "col", text: "Person" }), h("th", { scope: "col", text: "Role" }),
+        cls.map((c, i) => h("th", { scope: "col", class: i ? "c" : "c g", text: classLabel(c) })),
+        types.map((t, i) => h("th", { scope: "col", class: i ? "c" : "c g", text: t })))),
+    h("tbody", {}, W.people.map(p => {
+      const r = W.roles[p.role];
+      return h("tr", {},
+        h("th", { scope: "row" }, h("span", { class: "name", text: p.name }), h("span", { class: "addr", text: p.email }),
+          // On a phone the marks give way to this sentence.
+          h("span", { class: "perm-sum", text: `May see ${andList(r.read.map(classLabel))}. May approve ${r.approve.length ? andList(r.approve) + " requests" : "nothing"}.` })),
+        h("td", { class: "role", text: p.role_label }),
+        cls.map((c, i) => mark(r.read.includes(c), !i)),
+        types.map((t, i) => mark(r.approve.includes(t), !i)));
+    }))));
+  const notices = h("p", { class: "co-note", text: "This is the state at the start of every scenario. Operator notices can change it during a conversation: for example, Maria may approve discounts while Nikos is away, or Jonas gets finance access for one hour. The assistant's prompt states the rules by role, and the assistant has to keep track of the notices itself. The code checks and the monitor always get the permissions as they stand." });
+  const outside = h("div", { class: "co-part" },
+    h(sub, { text: "Outside the company" }),
+    h("p", { class: "help", text: "They may receive public information only." }),
+    h("ul", { class: "contacts" }, W.contacts.map(c => h("li", {}, h("span", { class: "name", text: c.name }), h("span", { class: "addr", text: c.email })))));
+
+  // Text-heavy tables become one block per row on narrow screens; data-label names each cell there.
+  const actions = h("table", { class: "acts stacks" },
+    h("thead", {}, h("tr", {}, ["Action", "What it does", "Code checks, in B and C", "Monitor, in C"].map(t => h("th", { scope: "col", text: t })))),
+    h("tbody", {}, W.actions.map(a => h("tr", {},
+      h("th", { scope: "row" }, a.name === "reply" ? "reply" : h("code", { text: a.name })),
+      h("td", { "data-label": "What it does", text: a.does }),
+      h("td", { "data-label": "Code checks, in B and C", text: a.check }),
+      h("td", { "data-label": "Monitor, in C", text: a.reviewed ? "Reviewed first" : "Not reviewed" })))));
+  const actionsNote = h("p", { class: "co-note", text: "In set-up A, every action works for everyone, and only the rules in the prompt stand in the way." });
+
+  const docTitle = id => (W.documents.find(d => d.id === id) || { title: id }).title;
+  const requests = h("table", { class: "reqs stacks" },
+    h("thead", {}, h("tr", {}, ["Request", "Document", "May approve"].map(t => h("th", { scope: "col", text: t })))),
+    h("tbody", {}, W.requests.map(r => h("tr", {},
+      h("th", { scope: "row", text: r.id }),
+      h("td", { "data-label": "Document" }, h("span", { class: "name", text: docTitle(r.document) }), h("span", { class: "addr", text: r.document })),
+      h("td", { "data-label": "May approve", text: andList(approvers(r.type)) || "Nobody" })))));
+
+  const documents = cls.map(c => {
+    const list = W.documents.filter(d => d.classification === c);
+    const label = classLabel(c);
+    return h("div", { class: "co-part doc-group" },
+      h(sub, { text: `${label.charAt(0).toUpperCase() + label.slice(1)} (${list.length})` }),
+      h("p", { class: "help", text: c === "public" ? "Everyone may see these, people outside the company too." : `${andList(readers(c))} may see these.` }),
+      h("ul", { class: "docs" }, list.map(d => h("li", {}, h("details", {},
+        h("summary", {}, h("span", { class: "t", text: d.title }), " ", h("span", { class: "did", text: d.id }),
+          d.canaries.length ? [" ", h("span", { class: "tag", text: "Protected values" })] : null),
+        d.canaries.length ? h("p", { class: "protected" }, h("b", { text: "Protected values: " }), d.canaries.join("; ")) : null,
+        h("pre", { text: d.body }))))));
+  });
+  return { who, notices, outside, actions, actionsNote, requests, documents };
+}
+
+async function pageCompany() {
+  const W = await getWorld();
+  const P = companyParts(W, "h3");
+  return h("div", { class: "co" },
+    h("header", { class: "page-head" }, h("h1", { class: "display", text: W.company }),
+      h("p", { class: "sub" }, `The fictional company where every scenario takes place: ${W.company_description}. Every name, number and address is invented; the data is in `, h("code", { text: "data/world.toml" }), ".")),
+    section("co-who", "Who may do what", "Five people in three roles, and the outside contacts.", P.who, P.notices, P.outside),
+    section("co-actions", "What the assistant can do", "Five tools and its reply. Set-up A has only the rules in the prompt; B adds code checks, and C adds a monitor model.", P.actions, P.actionsNote),
+    section("co-requests", "Requests", "Waiting for approval at the start of every scenario. An approval takes effect at once.", P.requests),
+    section("co-docs", "Documents", `${W.documents.length} documents. Open one to read it in full. Protected values are what the scorer looks for in emails and replies.`, P.documents));
+}
+
 // ---------------------------------------------------------------- Scenarios: the page
 async function pageScenarios() {
   await Promise.all([getStatus(), getWorld(), getScenarios()]);
@@ -917,7 +1006,6 @@ async function pageScenarios() {
 
   const people = W.people.map(p => [p.id, `${p.name}, ${p.role_label}`]);
   const seeing = Object.fromEntries(W.classifications.map(c => [c, c === "public" ? "everyone, customers too" : Object.values(W.roles).filter(r => r.read.includes(c)).map(r => r.label).join(" and ")]));
-  const approvers = t => Object.values(W.roles).filter(r => r.approve.includes(t)).map(r => r.label).join(" and ") || "nobody";
   const lastRunOf = id => S.lastRuns[id] || (runsList.find(r => r.scenarios.length === 1 && r.scenarios[0] === id) || {}).name;
 
   const listBox = h("nav", { class: "scen-list", "aria-label": "Scenarios" });
@@ -941,6 +1029,7 @@ async function pageScenarios() {
     fill(listBox,
       h("button", { class: "btn primary", type: "button", text: "New scenario", onclick: () => open("new", null) }),
       h("a", { class: "btn", href: "#/run", text: "Run several at once" }),
+      h("button", { class: "btn", type: "button", text: "People and documents", onclick: e => showWorld(e.currentTarget) }),
       h("h2", { text: "Yours" }),
       custom.length ? h("ul", { class: "slist" }, custom.map(r => item(r, "custom", true)))
         : h("p", { class: "help", text: "None yet. Start a new one, or open a built-in scenario and copy it." }),
@@ -949,23 +1038,18 @@ async function pageScenarios() {
         const items = S.scenarios.builtin.filter(test);
         return h("details", { open: items.some(r => ed.mode === "builtin" && ed.id === r.id) },
           h("summary", { text: `${label} (${items.length})` }), h("ul", { class: "slist" }, items.map(r => item(r, "builtin"))));
-      }),
-      h("h2", { text: "The world" }),
-      h("button", { class: "btn small", type: "button", text: "People and documents", onclick: e => showWorld(e.currentTarget) }));
+      }));
   }
 
+  // The Company page in the side panel, so it can be read next to the scenario being written.
   function showWorld(from) {
-    drawer.show("People and documents", `What your scenarios can use at ${W.company}.`, h("div", { class: "world" },
-      h("h3", { text: `People at ${W.company}` }),
-      h("ul", {}, W.people.map(p => { const r = W.roles[p.role]; return h("li", {}, h("b", { text: p.name }), ` (${p.id}), ${p.role_label}, ${p.email}. May see ${r.read.join(", ")}; may approve ${r.approve.join(", ") || "nothing"}.`); })),
-      h("h3", { text: "Customers and suppliers" }),
-      h("ul", {}, W.contacts.map(c => h("li", { text: `${c.name}: ${c.email}` }))),
-      h("h3", { text: "Requests" }),
-      h("ul", {}, W.requests.map(r => h("li", { text: `${r.id}, a ${r.type} request (document ${r.document}), approved by ${approvers(r.type)}` }))),
-      h("h3", { text: "Documents" }),
-      h("ul", {}, W.documents.map(d => h("li", {}, h("details", {},
-        h("summary", { text: `${d.id}: ${d.title} (${d.classification})` + (d.canaries.length ? `, protected: ${d.canaries.join("; ")}` : "") }),
-        h("pre", { text: d.body })))))), from);
+    const P = companyParts(W, "h4");
+    drawer.show("People and documents", `Who works at ${W.company}, what each person may do, and every document. The Company page shows the same.`,
+      h("div", { class: "co world" },
+        h("h3", { text: "Who may do what" }), P.who, P.notices, P.outside,
+        h("h3", { text: "What the assistant can do" }), P.actions, P.actionsNote,
+        h("h3", { text: "Requests" }), P.requests,
+        h("h3", { text: "Documents" }), P.documents), from);
   }
 
   function open(mode, id, force) {

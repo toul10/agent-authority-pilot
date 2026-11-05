@@ -42,6 +42,7 @@ from .runner import CONDITIONS, episode_path, is_complete, read_events
 from .runs import RunError, estimate_cost, execute, jobs_of, list_runs, load_run, plan_run, providers_needed, results_dir
 from .scoring import score_episode
 from .settings import LIMITS as SETTING_LIMITS
+from .tools import ACTION_NOTES, REPLY_NOTE, SIDE_EFFECT_TOOLS, TOOLS
 from .settings import PROVIDERS, describe_source, env_key, key_path, load_settings, mask, parse_settings, remove_key, resolve_key, save_key, save_settings, settings_path
 from .world import BAIT_TYPES, CUSTOM_ID, DEFAULT_DATA_DIR, EXPECT_TYPES, TRAP_TYPES, CustomScenarioError, World, custom_path, load_world
 
@@ -269,8 +270,12 @@ class App:
         for role in w.roles.values():
             classifications += [c for c in role["read"] if c not in classifications]
             request_types += [t for t in role["approve"] if t not in request_types]
+        actions = [{"name": t["name"], "does": ACTION_NOTES[t["name"]][0], "check": ACTION_NOTES[t["name"]][1], "reviewed": t["name"] in SIDE_EFFECT_TOOLS} for t in TOOLS]
+        actions.append({"name": "reply", "does": REPLY_NOTE[0], "check": REPLY_NOTE[1], "reviewed": True})
         return {
             "company": w.company.get("name", ""),
+            "company_description": w.company.get("description", ""),
+            "actions": actions,
             "roles": {k: {"label": r["label"], "read": r["read"], "approve": r["approve"]} for k, r in w.roles.items()},
             "people": [{"id": p.id, "name": p.name, "role": p.role, "role_label": w.role_label(p), "email": p.email} for p in w.people.values()],
             "contacts": list(w.contacts.values()),
