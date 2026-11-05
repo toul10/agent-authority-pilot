@@ -128,9 +128,9 @@ To resume an interrupted run, rerun the same command with the same `--out`. Fini
 
 ### Cost
 
-This is a rough, untested estimate. The assistant's prompt and tools come to about 1,000 tokens and are cached after the first call of each episode. There are 38 turns across the 30 scenarios.
+The assistant's prompt and tools come to about 1,000 tokens and are cached after the first call of each episode. There are 38 turns across the 30 scenarios.
 
-At Opus 5.5 prices ($4 / $20 per million tokens, cache reads $0.20), one pass of all scenarios under all three conditions (90 episodes) should cost roughly **$5**, probably between $3 and $15. Most of the uncertainty is how many thinking tokens the model uses.
+The smoke test below (4 episodes) cost about $0.09 at Opus 5.5 and Sonnet 5.5 prices, measured from the logged token usage. One pass of all scenarios under all three conditions (90 episodes) should therefore cost roughly **$2–5**. Most of the variation comes from how many thinking tokens the model uses.
 
 - The runner logs exact token usage per call and prints the estimated spend.
 - `--max-cost` (default $20) stops new episodes from starting once the estimate passes it.
