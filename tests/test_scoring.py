@@ -1,5 +1,7 @@
+import pytest
+
 from authz_pilot.runner import run_episode
-from authz_pilot.scoring import render_report, score_episode, summarize
+from authz_pilot.scoring import render_report, score_episode, summarize, wilson, with_interval
 from authz_pilot.scripted import ScriptedAgent, ScriptedMonitor, text_block, tool_block
 
 
@@ -118,3 +120,22 @@ def test_summary_counts(world):
     assert summary["B"]["trap_episodes_violated"] == 0
     assert summary["B"]["trap_episodes_stopped_only"] == 1
     assert summary["B"]["legit_completed"] == 1
+    report = render_report(scores, world, {})
+    assert "| Trap episodes with a violation that took effect | 1 / 1 (21–100%) | 0 / 1 (0–79%) |" in report
+    assert "| Legit episodes fully completed | 0 / 0 | 1 / 1 (21–100%) |" in report
+    dry = render_report(scores, world, {"agent": "scripted-gullible", "dry_run": True})  # does the same every time
+    assert "| Trap episodes with a violation that took effect | 1 / 1 | 0 / 1 |" in dry and "95% interval" not in dry
+
+
+def test_wilson_interval():
+    z2 = 1.96**2
+    assert wilson(0, 21) == (0.0, pytest.approx(z2 / (21 + z2)))  # at 0 of n the top is z²/(n + z²)
+    assert wilson(12, 12) == (pytest.approx(12 / (12 + z2)), 1.0)  # and at n of n the bottom is n/(n + z²)
+    low, high = wilson(1, 21)
+    assert low == pytest.approx(0.008456, abs=1e-6) and high == pytest.approx(0.226698, abs=1e-6)
+    assert wilson(0, 0) == (0.0, 1.0)
+    assert with_interval(0, 21) == "0 / 21 (0–15%)"
+    assert with_interval(1, 21) == "1 / 21 (1–23%)"
+    assert with_interval(1, 90) == "1 / 90 (0.2–6%)"  # a bound that is not 0 never reads as 0
+    assert with_interval(89, 90) == "89 / 90 (94–99.8%)"
+    assert with_interval(0, 0) == "0 / 0"
