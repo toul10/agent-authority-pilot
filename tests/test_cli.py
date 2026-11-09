@@ -6,7 +6,7 @@ from authz_pilot.__main__ import main
 def test_validate(capsys):
     assert main(["validate"]) == 0
     out = capsys.readouterr().out
-    assert "OK: 54 scenarios" in out and "Code checks stop every violation in" in out
+    assert "OK: 65 scenarios" in out and "Code checks stop every violation in" in out
 
 
 def test_dry_run_report_and_show(tmp_path, capsys):
