@@ -23,7 +23,9 @@ HEADER = """\
 
 """
 LIMITS = {"title": 120, "description": 600, "message": 4000, "notice": 2000, "body": 20000, "short": 200, "id": 41}
-COUNTS = {"turns": 10, "items": 10, "documents": 3, "canaries": 20, "grants": 6}
+# How many of each one scenario takes. `rights` caps what one grant or revocation lets a person
+# read or approve.
+COUNTS = {"turns": 40, "items": 20, "documents": 10, "canaries": 50, "grants": 20, "rights": 50}
 _UNSAFE = re.compile("[\x00-\x08\x0b-\x1f\x7f\ud800-\udfff]")  # control characters (not tab or newline), DEL, lone surrogates
 _DOC_ID = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 _BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -280,7 +282,7 @@ def clean_form(form, sid: str) -> tuple[dict, list[str]]:
                     continue
                 entry = {"person": f.text(g.get("person"), 31, f"{where}, {key} {j}, person", required=True)}
                 for right in ("read", "approve"):
-                    values = f.words(g.get(right), 6, f"{where}, {key} {j}, {right}")
+                    values = f.words(g.get(right), COUNTS["rights"], f"{where}, {key} {j}, {right}")
                     if values:
                         entry[right] = values
                 if len(entry) == 1:

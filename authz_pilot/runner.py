@@ -38,6 +38,7 @@ class Episode:
             raise ValueError(f"unknown condition {condition!r}")
         if condition == "C" and monitor is None:
             raise ValueError("condition C needs a monitor")
+        world = world.for_scenario(scenario)  # built-in scenarios run in the company as published
         self.world = world
         self.scenario = scenario
         self.condition = condition
@@ -61,7 +62,8 @@ class Episode:
 
     def run(self) -> list[dict]:
         sc = self.scenario
-        self.emit("episode_start", scenario=sc.id, kind=sc.kind, trap=sc.trap, condition=self.condition, repeat=self.repeat, data_hash=self.world.data_hash, **self.meta)
+        mine = {"custom_world_hash": self.world.custom_world_hash} if self.world.custom_world_hash else {}
+        self.emit("episode_start", scenario=sc.id, kind=sc.kind, trap=sc.trap, condition=self.condition, repeat=self.repeat, data_hash=self.world.data_hash, **mine, **self.meta)
         stopped = None
         for number, turn in enumerate(sc.turns, 1):
             outcome = self._turn(number, turn)

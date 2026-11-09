@@ -29,15 +29,24 @@ from .runner import CONDITIONS, is_complete, read_events
 from .runs import RunError, execute, load_run, pick_scenarios, plan_run, problems_for_run, providers_needed, write_report
 from .scoring import score_episode
 from .settings import PROVIDERS, describe_source, env_key, load_settings, mask, parse_settings, remove_key, resolve_key, save_key
-from .world import DEFAULT_DATA_DIR, CustomScenarioError, custom_path, load_world, validate
+from .world import DEFAULT_DATA_DIR, CustomScenarioError, custom_path, custom_world_path, load_world, validate
 
 
 def _world(data_dir) -> object | None:
+    """The built-in world with your own scenarios and your additions to the company. Additions
+    that cannot be read are left out (see World.additions_error): only your scenarios need them."""
     try:
-        return load_world(data_dir, custom=custom_path())
+        return load_world(data_dir, custom=custom_path(), custom_world=custom_world_path(), strict=False)
     except CustomScenarioError as exc:
         print(f"Your scenarios cannot be read: {exc}")
         return None
+
+
+def _additions_summary(world) -> str:
+    names = {"roles": ("role", "roles"), "request_types": ("request type", "request types"), "people": ("person", "people"),
+             "contacts": ("contact", "contacts"), "documents": ("document", "documents"), "requests": ("request", "requests")}
+    parts = [f"{len(ids)} {names[k][len(ids) != 1]}" for k, ids in world.additions.items() if ids]
+    return ", ".join(parts)
 
 
 def _load_run(run_dir: Path):
@@ -50,6 +59,9 @@ def _load_run(run_dir: Path):
 def cmd_validate(args) -> int:
     world = _world(args.data)
     if world is None:
+        return 1
+    if world.additions_error:
+        print(f"Your additions to the company cannot be read: {world.additions_error}")
         return 1
     problems = validate(world)
     if problems:
@@ -65,6 +77,8 @@ def cmd_validate(args) -> int:
     legit = sum(s.kind == "legit" for s in builtin)
     mine = len(world.scenarios) - len(builtin)
     print(f"OK: {len(builtin)} scenarios ({legit} legit, {len(builtin) - legit} traps)" + (f" and {mine} of your own" if mine else "") + f", data {world.data_hash}.")
+    if world.additions:
+        print(f"Your additions to the company ({_additions_summary(world)}) checked; only your own scenarios use them.")
     print("\nWhat code checks (condition B) can stop when an agent takes every bait (scripted, no model):\n")
     print("| Trap | Type | Violations without checks | Still take effect with code checks |")
     print("|---|---|---|---|")
@@ -276,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
 
     r = sub.add_parser("run", help="run scenarios against a real model (Claude, GPT or Gemini), or --dry-run with a scripted agent")
     r.add_argument("--conditions", default="A,B,C", help="comma-separated subset of A,B,C")
-    r.add_argument("--scenarios", default="all", help="all (the 30 built-in ones), legit, trap, custom (yours), or comma-separated ids")
+    r.add_argument("--scenarios", default="all", help="all (the built-in ones), legit, trap, custom (yours), or comma-separated ids")
     r.add_argument("--repeats", type=int, default=1)
     r.add_argument("--model", choices=list(MODELS), help="the assistant (default: the saved setting, else claude-opus-5-5)")
     r.add_argument("--effort", choices=EFFORTS, help="default: the saved setting, else medium")

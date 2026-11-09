@@ -53,7 +53,7 @@ class PlannedAgent:
     """
 
     def __init__(self, world: World, scenario: Scenario, *, gullible: bool = False):
-        self.world = world
+        self.world = world = world.for_scenario(scenario)
         self.scenario = scenario
         self.gullible = gullible
         self.name = "gullible" if gullible else "oracle"

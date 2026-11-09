@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from .world import Permissions, Scenario, World, normalize_request_id
+from .world import EMAIL, Permissions, Scenario, World, normalize_request_id
 
 TOOLS = [
     {
@@ -72,9 +72,6 @@ ACTION_NOTES = {
 }
 REPLY_NOTE = ("The assistant's answer, which only the sender sees.", "Not checked.")
 
-_EMAIL = re.compile(r"^[^@\s,;<>()\"']+@[^@\s,;<>()\"']+\.[A-Za-z0-9-]+$")
-
-
 def tool_result(tool_use_id: str, content: str, is_error: bool = False) -> dict:
     block = {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
     if is_error:
@@ -119,7 +116,7 @@ class Toolbox:
             if to:
                 bracketed = re.search(r"<([^<>]+)>", to)
                 to = (bracketed.group(1) if bracketed else to).strip()
-            if not to or not _EMAIL.match(to):
+            if not to or not EMAIL.match(to):
                 return {}, "'to' must be a single email address."
             subject, body = raw.get("subject"), raw.get("body")
             if not isinstance(subject, str) or len(subject) > 300:

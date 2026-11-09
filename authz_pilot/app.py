@@ -34,6 +34,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import __version__
+from .additions import COUNTS as ADD_COUNTS, LIMITS as ADD_LIMITS, additions_toml, check_additions, clean_additions, load_additions_raw, save_additions, to_form
 from .custom import COUNTS, LIMITS, check_scenario, clean_form, dump, load_raw, next_id, remove, upsert
 from .dashboard import SHORT, build_payload, outcome, render_dashboard
 from .models import EFFORTS, MODEL_INFO, model_notes, provider_of
@@ -44,7 +45,7 @@ from .scoring import score_episode
 from .settings import LIMITS as SETTING_LIMITS
 from .tools import ACTION_NOTES, REPLY_NOTE, SIDE_EFFECT_TOOLS, TOOLS
 from .settings import PROVIDERS, describe_source, env_key, key_path, load_settings, mask, parse_settings, remove_key, resolve_key, save_key, save_settings, settings_path
-from .world import BAIT_TYPES, CUSTOM_ID, DEFAULT_DATA_DIR, EXPECT_TYPES, TRAP_TYPES, CustomScenarioError, World, custom_path, load_world
+from .world import BAIT_TYPES, CUSTOM_ID, DEFAULT_DATA_DIR, EXPECT_TYPES, TRAP_TYPES, CustomScenarioError, CustomWorldError, World, custom_path, custom_world_path, load_world
 
 WEB = Path(__file__).parent / "web"
 STATIC = {
@@ -55,7 +56,7 @@ STATIC = {
     "report.css": "text/css; charset=utf-8",
     "fonts/commissioner.woff2": "font/woff2",
 }
-MAX_BODY = 256 * 1024
+MAX_BODY = 8 * 1024 * 1024  # far above any real form (see COUNTS in additions.py)
 RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,150}$")
 QUICK_START = ["L01", "T05"]  # one legit request and one trap, one message each
 API_NAMES = {"anthropic": "Claude API", "openai": "OpenAI API", "google": "Gemini API"}
@@ -132,14 +133,15 @@ class LiveRun:
 
 
 class App:
-    def __init__(self, *, results: Path | None = None, data_dir: Path = DEFAULT_DATA_DIR, custom: Path | None = None):
+    def __init__(self, *, results: Path | None = None, data_dir: Path = DEFAULT_DATA_DIR, custom: Path | None = None, custom_world: Path | None = None):
         self.results = Path(results or results_dir())
         self.data_dir = Path(data_dir)
         self.custom = Path(custom or custom_path())
+        self.custom_world = Path(custom_world or custom_world_path())
         self.token = secrets.token_urlsafe(32)
         self.port = 0
         self.lock = threading.Lock()  # starting runs
-        self.custom_lock = threading.Lock()  # writing the custom scenario file
+        self.custom_lock = threading.Lock()  # writing your scenarios or your additions, and copying them into a run
         self.current: LiveRun | None = None
         self.rows: dict[tuple, dict] = {}  # scored episode rows, by (path, mtime, size)
 
@@ -150,12 +152,21 @@ class App:
 
     # ------------------------------------------------------------------ worlds
 
-    def builtin_world(self) -> World:
-        return load_world(self.data_dir)
+    def company_world(self) -> World:
+        """The company as your own scenarios see it: as published, plus your additions. If your
+        additions cannot be read, the company as published, with the reason in additions_error."""
+        return load_world(self.data_dir, custom_world=self.custom_world, strict=False)
+
+    def published_with_mine(self) -> World:
+        """The company as published, with your scenarios when their file can be read."""
+        try:
+            return load_world(self.data_dir, custom=self.custom)
+        except CustomScenarioError:
+            return load_world(self.data_dir)
 
     def full_world(self) -> World:
         try:
-            return load_world(self.data_dir, custom=self.custom)
+            return load_world(self.data_dir, custom=self.custom, custom_world=self.custom_world, strict=False)
         except CustomScenarioError as exc:
             raise ApiError(400, f"Your scenarios file cannot be read, so fix it by hand first: {exc}") from exc
 
@@ -165,6 +176,8 @@ class App:
         ("GET", r"/api/status", "status"),
         ("GET", r"/api/world", "world_info"),
         ("GET", r"/api/scenarios", "scenarios"),
+        ("POST", r"/api/world/check", "check_world"),
+        ("POST", r"/api/world", "save_world"),
         ("POST", r"/api/scenarios/check", "check"),
         ("POST", r"/api/scenarios", "save"),
         ("DELETE", r"/api/scenarios/([^/]+)", "delete_scenario"),
@@ -223,7 +236,7 @@ class App:
             "limits": {k: list(v) for k, v in SETTING_LIMITS.items()},
             "models": [{"id": m, "name": i.name, "price": list(i.price_on()), "provider": i.provider, "group": i.group, "efforts": list(i.effort_levels), "notes": {r: model_notes(i, r) for r in ("assistant", "monitor")}} for m, i in MODEL_INFO.items()],
             "efforts": list(EFFORTS),
-            "paths": {"settings": str(settings_path()), "key": str(key_path()), "keys": {p: str(key_path(p)) for p in PROVIDERS}, "custom": str(self.custom), "results": str(self.results)},
+            "paths": {"settings": str(settings_path()), "key": str(key_path()), "keys": {p: str(key_path(p)) for p in PROVIDERS}, "custom": str(self.custom), "custom_world": str(self.custom_world), "results": str(self.results)},
             "run": {"name": current.name, "status": current.status} if current else None,
             "quick_start": QUICK_START,
         }
@@ -264,25 +277,32 @@ class App:
     # ------------------------------------------------------------------ scenarios
 
     def world_info(self, body: dict) -> dict:
-        w = self.builtin_world()
-        classifications: list[str] = []
-        request_types: list[str] = []
-        for role in w.roles.values():
-            classifications += [c for c in role["read"] if c not in classifications]
-            request_types += [t for t in role["approve"] if t not in request_types]
+        """The company as your own scenarios see it, each part marked `yours` if it is one of your
+        additions, and your additions again as the Company page's form edits them."""
+        w = self.company_world()
+        try:
+            raw, raw_error = load_additions_raw(self.custom_world), ""
+        except CustomWorldError as exc:
+            raw, raw_error = {}, str(exc)
         actions = [{"name": t["name"], "does": ACTION_NOTES[t["name"]][0], "check": ACTION_NOTES[t["name"]][1], "reviewed": t["name"] in SIDE_EFFECT_TOOLS} for t in TOOLS]
         actions.append({"name": "reply", "does": REPLY_NOTE[0], "check": REPLY_NOTE[1], "reviewed": True})
         return {
             "company": w.company.get("name", ""),
             "company_description": w.company.get("description", ""),
             "actions": actions,
-            "roles": {k: {"label": r["label"], "read": r["read"], "approve": r["approve"]} for k, r in w.roles.items()},
-            "people": [{"id": p.id, "name": p.name, "role": p.role, "role_label": w.role_label(p), "email": p.email} for p in w.people.values()],
-            "contacts": list(w.contacts.values()),
-            "documents": [{"id": d.id, "title": d.title, "classification": d.classification, "canaries": list(d.canaries), "body": d.body} for d in w.documents.values()],
-            "requests": [{"id": r.id, "type": r.type, "document": r.document} for r in w.requests.values()],
-            "classifications": classifications,
-            "request_types": request_types,
+            "roles": {k: {"label": r["label"], "read": r["read"], "approve": r["approve"], "yours": w.is_yours("roles", k)} for k, r in w.roles.items()},
+            "people": [{"id": p.id, "name": p.name, "role": p.role, "role_label": w.role_label(p), "email": p.email, "yours": w.is_yours("people", p.id)} for p in w.people.values()],
+            "contacts": [c | {"yours": w.is_yours("contacts", k)} for k, c in w.contacts.items()],
+            "documents": [{"id": d.id, "title": d.title, "classification": d.classification, "canaries": list(d.canaries), "body": d.body, "yours": w.is_yours("documents", d.id)} for d in w.documents.values()],
+            "requests": [{"id": r.id, "type": r.type, "document": r.document, "yours": w.is_yours("requests", r.id)} for r in w.requests.values()],
+            "classifications": w.classifications(),
+            "request_types": w.request_types(),
+            "request_prefixes": dict(w.company.get("request_prefixes", {})),
+            "additions": to_form(raw),
+            "additions_error": raw_error or w.additions_error,
+            "additions_readable": not raw_error,  # if not, the page will not save over the file
+            "additions_path": str(self.custom_world),
+            "additions_limits": {"limits": ADD_LIMITS, "counts": ADD_COUNTS},
             "trap_types": list(TRAP_TYPES),
             "expect_types": list(EXPECT_TYPES),
             "bait_types": list(BAIT_TYPES),
@@ -305,8 +325,40 @@ class App:
             raise ApiError(404, f"There is no scenario of yours with the id {sid!r}.")
         return sid
 
+    # ------------------------------------------------------------------ your additions to the company
+
+    def _additions_toml(self, raw: dict) -> str:
+        try:
+            return additions_toml(raw)
+        except ValueError:
+            return ""
+
+    def check_world(self, body: dict) -> dict:
+        world = self.published_with_mine()
+        raw, problems = clean_additions(body.get("form"), world)
+        result = {"problems": problems, "warnings": []} if problems else check_additions(world, raw)
+        return result | {"toml": self._additions_toml(raw), "form": to_form(raw)}
+
+    def save_world(self, body: dict) -> dict:
+        with self.custom_lock:
+            try:
+                load_additions_raw(self.custom_world)
+            except CustomWorldError as exc:  # never save over what someone wrote by hand
+                raise ApiError(400, f"Your additions file cannot be read, so fix it by hand first: {exc}") from exc
+            world = self.published_with_mine()
+            raw, problems = clean_additions(body.get("form"), world)
+            if problems:
+                raise ApiError(400, "Fix these first.", problems=problems)
+            result = check_additions(world, raw)
+            if result["problems"]:
+                raise ApiError(400, "Fix these first.", problems=result["problems"])
+            save_additions(self.custom_world, raw)
+        return result | {"toml": additions_toml(raw), "additions": to_form(raw)}
+
+    # ------------------------------------------------------------------ your scenarios
+
     def check(self, body: dict) -> dict:
-        world = self.builtin_world()
+        world = self.company_world()
         try:
             raws = load_raw(self.custom)
         except CustomScenarioError:
@@ -319,7 +371,7 @@ class App:
         return {"id": sid, **check_scenario(world, raw), "toml": dump([raw])}
 
     def save(self, body: dict) -> dict:
-        world = self.builtin_world()
+        world = self.company_world()
         with self.custom_lock:
             try:
                 raws = load_raw(self.custom)
@@ -392,7 +444,8 @@ class App:
             if self.current and self.current.status == "running":
                 raise ApiError(409, f"Run {self.current.name} is still going. Wait for it, or stop it.", current=self.current.name)
             try:
-                plan = plan_run(scenario_ids=ids, conditions=conditions, repeats=repeats, settings=settings, dry_run=mode == "dry", data_dir=self.data_dir, custom=self.custom, api_keys=keys, label=label, results=self.results)
+                with self.custom_lock:  # the run copies your scenarios and additions as they are now
+                    plan = plan_run(scenario_ids=ids, conditions=conditions, repeats=repeats, settings=settings, dry_run=mode == "dry", data_dir=self.data_dir, custom=self.custom, custom_world=self.custom_world, api_keys=keys, label=label, results=self.results)
             except RunError as exc:
                 raise ApiError(400, str(exc)) from None
             run = LiveRun(plan, dry_run=mode == "dry")

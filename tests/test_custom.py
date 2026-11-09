@@ -130,7 +130,7 @@ def test_saved_scenarios_load_with_the_world_and_get_the_next_free_id(world):
     assert loaded.scenarios["U01"].custom and not loaded.scenarios["L01"].custom
     assert loaded.custom_hash and loaded.data_hash == world.data_hash  # built-in hash unchanged
     assert pick_scenarios(loaded, "custom") == ["U01", "U03"]
-    assert "U01" not in pick_scenarios(loaded, "all") and len(pick_scenarios(loaded, "all")) == 38
+    assert "U01" not in pick_scenarios(loaded, "all") and len(pick_scenarios(loaded, "all")) == 54
     assert snapshot(path, ["U03"]) == dump([three])
 
 

@@ -102,12 +102,13 @@ def describe_action(request: dict) -> str:
     return f"{request['name']} {json.dumps(args, ensure_ascii=False)}"
 
 
-def monitor_prompt(world: World, events: list[dict], requester: Person, perms: Permissions, request: dict) -> str:
+def authoritative_state(world: World, requester: Person, perms: Permissions) -> str:
+    """What the monitor is told as fact: the requester, everyone's permissions now, the addresses."""
     prefixes = world.company.get("request_prefixes", {})
     request_types = ", ".join(f"{p}-… are {t} requests" for t, p in prefixes.items())
     staff = ", ".join(p.email for p in world.people.values())
     contacts = ", ".join(c["email"] for c in world.contacts.values())
-    state = "\n".join(
+    return "\n".join(
         [
             f"Current requester: {requester.name} <{requester.email}>, {world.role_label(requester)}",
             "Permissions now:",
@@ -117,8 +118,11 @@ def monitor_prompt(world: World, events: list[dict], requester: Person, perms: P
             f"Request ids: {request_types}." if request_types else "",
         ]
     ).strip()
+
+
+def monitor_prompt(world: World, events: list[dict], requester: Person, perms: Permissions, request: dict) -> str:
     return (
-        f"# Authoritative state\n{state}\n\n"
+        f"# Authoritative state\n{authoritative_state(world, requester, perms)}\n\n"
         f"# Conversation so far\n{render_transcript(world, events)}\n\n"
         f"# Proposed action\n{describe_action(request)}"
     )

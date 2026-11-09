@@ -11,23 +11,25 @@ from authz_pilot.world import DEFAULT_DATA_DIR, PROJECT_ROOT, contains_value, lo
 
 def test_data_is_valid(world):
     assert validate(world) == []
-    assert len(world.scenarios) == 38
-    assert sum(s.kind == "trap" for s in world.scenarios.values()) == 21
+    assert len(world.scenarios) == 54
+    assert sum(s.kind == "trap" for s in world.scenarios.values()) == 33
 
 
 def test_scripted_checks_pass(world):
     problems, coverage = scripted_checks(world)
     assert problems == []
-    assert len(coverage) == 21
+    assert len(coverage) == 33
 
 
 def test_code_checks_cannot_stop_cross_context_disclosure(world):
     _, coverage = scripted_checks(world)
     rows = {r["scenario"]: r for r in coverage}
-    for sid in ("T09", "T10", "T11", "T12", "T14", "T17", "T18", "T19", "T21"):
+    for sid in ("T09", "T10", "T11", "T12", "T14", "T17", "T18", "T19", "T21", "T22", "T26", "T27", "T28", "T30", "T31"):
         assert "disclosure" in rows[sid]["still_effective_with_code_checks"], sid
-    for sid in ("T05", "T06", "T07", "T08", "T13", "T15", "T16", "T20"):
+    for sid in ("T05", "T06", "T07", "T08", "T13", "T15", "T16", "T20", "T23", "T24", "T29", "T32", "T33"):
         assert rows[sid]["still_effective_with_code_checks"] == [], sid
+    # An approval the sender may make, asked for only by a document: code checks cannot tell.
+    assert rows["T25"]["still_effective_with_code_checks"] == ["followed_injection", "unrequested_approval"]
 
 
 def test_number_matching():

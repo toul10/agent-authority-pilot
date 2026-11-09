@@ -2,7 +2,8 @@
 
 The command line and the app both start runs through `plan_run` and `execute`.
 A run that uses your own scenarios keeps a copy of them (custom_scenarios.toml),
-so editing or deleting a scenario later never changes how an old run is scored.
+and of your additions to the company (custom_world.toml), which only your own
+scenarios use. Editing or deleting either later never changes how an old run is scored.
 """
 
 from __future__ import annotations
@@ -21,13 +22,15 @@ from . import __version__
 from .custom import snapshot
 from .dashboard import outcome, write_dashboard
 from .models import cost_usd, model_info, notices_channel, provider_of
+from .prompts import agent_system_prompt, authoritative_state
 from .runner import CONDITIONS, is_complete, read_events, run_batch
 from .scoring import EpisodeScore, render_report, score_episode, summarize
 from .settings import Settings
-from .world import DEFAULT_DATA_DIR, PROJECT_ROOT, CustomScenarioError, World, custom_path, load_world, only_added_since, validate
+from .world import DEFAULT_DATA_DIR, PROJECT_ROOT, CustomScenarioError, Permissions, World, custom_path, custom_world_path, load_world, only_added_since, validate
 
 SNAPSHOT = "custom_scenarios.toml"
-RESUME_KEYS = ("agent", "effort", "monitor", "monitor_effort", "data_hash", "custom_hash", "max_steps")
+WORLD_SNAPSHOT = "custom_world.toml"
+RESUME_KEYS = ("agent", "effort", "monitor", "monitor_effort", "data_hash", "custom_hash", "custom_world_hash", "max_steps")
 
 
 class RunError(Exception):
@@ -72,9 +75,9 @@ def data_dir_of(config: dict) -> Path:
 def load_run(run_dir: Path) -> tuple[dict, World, list[str]]:
     """A run's config and world (with its own copy of any custom scenarios), plus warnings."""
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
-    snap = run_dir / SNAPSHOT
+    snap, world_snap = run_dir / SNAPSHOT, run_dir / WORLD_SNAPSHOT
     data_dir = data_dir_of(config)
-    world = load_world(data_dir, custom=snap if snap.is_file() else None)
+    world = load_world(data_dir, custom=snap if snap.is_file() else None, custom_world=world_snap if world_snap.is_file() else None)
     warnings = []
     # Scenarios added since the run change the hash but not the scenarios it ran.
     if config.get("data_hash") != world.data_hash and not only_added_since(data_dir, config.get("data_hash") or ""):
@@ -113,8 +116,13 @@ def pick_scenarios(world: World, spec: str) -> list[str]:
 
 
 def problems_for_run(world: World, scenario_ids: list[str]) -> list[str]:
-    """Data problems that stop a run. Custom scenarios that are not part of it do not count."""
-    used = replace(world, scenarios={k: v for k, v in world.scenarios.items() if not v.custom or k in scenario_ids})
+    """Data problems that stop a run. Custom scenarios that are not part of it do not count, and
+    neither do your additions to the company unless the run has one of your own scenarios."""
+    mine = any(world.scenarios[s].custom for s in scenario_ids if s in world.scenarios)
+    if mine and world.additions_error:
+        return [f"your additions to the company cannot be read, so your own scenarios cannot run: {world.additions_error}"]
+    data = world if mine or world.base is None else world.base
+    used = replace(data, scenarios={k: v for k, v in world.scenarios.items() if not v.custom or k in scenario_ids})
     return validate(used)
 
 
@@ -150,6 +158,7 @@ def plan_run(
     out: Path | None = None,
     data_dir: Path = DEFAULT_DATA_DIR,
     custom: Path | None = None,
+    custom_world: Path | None = None,
     api_keys: dict[str, str | None] | None = None,
     label: str = "",
     results: Path | None = None,
@@ -163,8 +172,9 @@ def plan_run(
     if repeats < 1:
         raise RunError("Repeats must be at least 1.")
     custom = custom or custom_path()
+    custom_world = custom_world or custom_world_path()
     try:
-        live = load_world(data_dir, custom=custom)
+        live = load_world(data_dir, custom=custom, custom_world=custom_world, strict=False)
     except CustomScenarioError as exc:
         raise RunError(f"Your scenarios cannot be read: {exc}") from exc
     unknown = [s for s in scenario_ids if s not in live.scenarios]
@@ -176,6 +186,10 @@ def plan_run(
 
     custom_ids = [s for s in scenario_ids if live.scenarios[s].custom]
     snap = snapshot(custom, custom_ids) if custom_ids else None
+    # Your additions go with your own scenarios only: a run of built-in ones runs as published.
+    world_snap = custom_world.read_bytes() if custom_ids and live.custom_world_hash else None
+    if world_snap is not None and hashlib.sha256(world_snap).hexdigest()[:12] != live.custom_world_hash:
+        raise RunError("Your additions to the company changed while the run was starting. Start it again.")
     if dry_run:
         config = {"agent": f"scripted-{scripted_agent}", "monitor": "scripted (allows everything)", "dry_run": True}
     else:
@@ -194,6 +208,7 @@ def plan_run(
         "git_commit": git_commit(),
         "data_hash": live.data_hash,
         "custom_hash": hashlib.sha256(snap.encode("utf-8")).hexdigest()[:12] if snap else "",
+        "custom_world_hash": live.custom_world_hash if world_snap is not None else "",
         "data_dir": portable(data_dir),
         "conditions": conditions,
         "scenarios": scenario_ids,
@@ -213,10 +228,12 @@ def plan_run(
     out.mkdir(parents=True, exist_ok=True)
     if snap:
         (out / SNAPSHOT).write_text(snap, encoding="utf-8")
+    if world_snap is not None:
+        (out / WORLD_SNAPSHOT).write_bytes(world_snap)  # the same bytes, so the same hash
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
-    # What runs is the copy in the run folder, never the live custom file.
-    world = load_world(data_dir, custom=out / SNAPSHOT if snap else None)
+    # What runs is the copy in the run folder, never the live custom files.
+    world = load_world(data_dir, custom=out / SNAPSHOT if snap else None, custom_world=out / WORLD_SNAPSHOT if world_snap is not None else None)
     jobs = [(sid, c, r) for r in range(1, repeats + 1) for sid in scenario_ids for c in conditions]
     if dry_run:
         from .scripted import PlannedAgent, ScriptedMonitor
@@ -274,11 +291,40 @@ AGENT_TOKENS_PER_MESSAGE = {"input_tokens": 6, "output_tokens": 234, "cache_crea
 MONITOR_TOKENS_PER_MESSAGE = {"input_tokens": 2080, "output_tokens": 88}
 
 
+# Model calls per message, measured in results/2026-11-09-harder-traps-2-claude-opus-5-5 (144
+# episodes): the assistant made about 2.4, and the monitor, in condition C, about 1.35.
+AGENT_CALLS_PER_MESSAGE = 2.4
+MONITOR_CALLS_PER_MESSAGE = 1.35
+CHARS_PER_TOKEN = 4  # roughly, for English
+
+
+def company_growth(world: World) -> tuple[float, float]:
+    """How many tokens more each call carries in your own scenarios than in the built-in ones, for
+    the assistant and for the monitor. Your additions are in the assistant's system prompt (staff,
+    contacts, access policy) and in the monitor's authoritative state (everyone's permissions and
+    addresses), so a bigger company makes every call longer."""
+    if world.base is None:
+        return 0.0, 0.0
+    someone = next(iter(world.base.people.values()))
+
+    def size(w: World) -> tuple[int, int]:
+        return len(agent_system_prompt(w)), len(authoritative_state(w, someone, Permissions(w)))
+
+    (agent0, monitor0), (agent1, monitor1) = size(world.base), size(world)
+    return max(0, agent1 - agent0) / CHARS_PER_TOKEN, max(0, monitor1 - monitor0) / CHARS_PER_TOKEN
+
+
 def estimate_cost(world: World, scenario_ids: list[str], conditions: list[str], model: str, monitor_model: str, repeats: int = 1) -> dict:
-    """A rough cost estimate for a real run, from the measured tokens per message."""
+    """A rough cost estimate for a real run, from the measured tokens per message, plus what your
+    additions to the company add to every call in your own scenarios."""
     messages = sum(len(world.scenarios[s].turns) for s in scenario_ids) * repeats
-    agent = (cost_usd(model, AGENT_TOKENS_PER_MESSAGE) or 0.0) * messages * len(conditions)
-    monitor = (cost_usd(monitor_model, MONITOR_TOKENS_PER_MESSAGE) or 0.0) * messages if "C" in conditions else 0.0
+    custom = sum(len(world.scenarios[s].turns) for s in scenario_ids if world.scenarios[s].custom) * repeats
+    agent_more, monitor_more = company_growth(world) if custom else (0.0, 0.0)
+    # The assistant's system prompt comes from the prompt cache after the first call; the monitor gets its state in full.
+    agent_extra = cost_usd(model, {"cache_read_input_tokens": agent_more * AGENT_CALLS_PER_MESSAGE}) or 0.0
+    monitor_extra = cost_usd(monitor_model, {"input_tokens": monitor_more * MONITOR_CALLS_PER_MESSAGE}) or 0.0
+    agent = ((cost_usd(model, AGENT_TOKENS_PER_MESSAGE) or 0.0) * messages + agent_extra * custom) * len(conditions)
+    monitor = ((cost_usd(monitor_model, MONITOR_TOKENS_PER_MESSAGE) or 0.0) * messages + monitor_extra * custom) if "C" in conditions else 0.0
     return {"usd": round(agent + monitor, 4), "episodes": len(scenario_ids) * len(conditions) * repeats, "messages": messages * len(conditions)}
 
 

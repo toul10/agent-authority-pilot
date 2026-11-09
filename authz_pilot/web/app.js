@@ -101,7 +101,7 @@ function setHelp(fieldEl, text) {
   p.hidden = !text;
 }
 // Options are [value, label] or [value, label, group]; a run of options with the same group shares an <optgroup>.
-function selectEl(options, value, onchange, props) {
+function optionNodes(options) {
   const kids = [];
   let box = null;
   for (const [v, label, group] of options) {
@@ -110,10 +110,24 @@ function selectEl(options, value, onchange, props) {
     if (!box || box.label !== group) kids.push(box = h("optgroup", { label: group }));
     box.append(opt);
   }
-  const el = h("select", props, kids);
-  const want = value == null ? "" : String(value);
-  if (want && !options.some(([v]) => v === want)) el.append(h("option", { value: want, text: want }));
-  el.value = want;
+  return kids;
+}
+// `lazy` keeps only the chosen option until the list is first opened: for long lists, such as
+// everyone in the company in each of 40 messages.
+function selectEl(options, value, onchange, props, lazy) {
+  const el = h("select", props);
+  const want = value == null ? "" : String(value), known = options.find(([v]) => v === want);
+  const all = () => {
+    fill(el, optionNodes(options));
+    if (want && !known) el.append(h("option", { value: want, text: want }));
+    el.value = want;
+  };
+  if (lazy) {
+    el.append(h("option", { value: want, text: known ? known[1] : want }));
+    const open = () => { if (el.options.length === 1) { el.removeEventListener("mousedown", open); el.removeEventListener("focus", open); all(); } };
+    el.addEventListener("mousedown", open);
+    el.addEventListener("focus", open);
+  } else all();
   if (onchange) el.addEventListener("change", () => onchange(el.value));
   return el;
 }
@@ -627,6 +641,7 @@ async function pageStart() {
 
   const ownBody = () => h("div", { class: "stack" },
     h("p", { class: "sub", text: "On the Scenarios page, write who sends each message, what a careful assistant does and, for a trap, what a fooled one would do. Run it and the result shows up right next to it." }),
+    h("p", { class: "sub" }, "Need a role, a person or a document the company does not have? Add it on ", h("a", { href: "#/company/edit", text: "Company, Your additions" }), "."),
     h("div", { class: "actions" }, h("a", { class: "btn", href: "#/scenarios", text: "Open Scenarios" })));
 
   const custom = () => (S.scenarios && S.scenarios.custom) || [];
@@ -747,6 +762,7 @@ async function pageSettings() {
         h("dt", { text: "Settings" }), h("dd", {}, h("code", { text: p.settings })),
         Object.entries(p.keys).map(([id, path]) => [h("dt", { text: `Saved ${st.providers[id].name} key` }), h("dd", {}, h("code", { text: path }))]),
         h("dt", { text: "Your scenarios" }), h("dd", {}, h("code", { text: p.custom })),
+        h("dt", { text: "Your additions to the company" }), h("dd", {}, h("code", { text: p.custom_world })),
         h("dt", { text: "Results" }), h("dd", {}, h("code", { text: p.results })))));
 }
 
@@ -889,7 +905,8 @@ function newEditor(mode, id, form, from) {
 }
 function saveDraft() {
   const ed = S.editor;
-  try { localStorage.setItem("authz-draft", JSON.stringify({ mode: ed.mode, id: ed.id, form: ed.form, base: ed.base, from: ed.from })); } catch (e) {}
+  try { localStorage.setItem("authz-draft", JSON.stringify({ mode: ed.mode, id: ed.id, form: ed.form, base: ed.base, from: ed.from })); }
+  catch (e) { try { localStorage.removeItem("authz-draft"); } catch (e2) {} }  // too big to keep: never restore an older one
 }
 function restoreDraft() {
   let d = null;
@@ -910,7 +927,10 @@ function restoreDraft() {
 const section = (id, title, sub, ...body) => h("section", { class: "set-section", "aria-labelledby": id },
   h("header", {}, h("h2", { id, text: title }), sub ? h("p", { class: "sub", text: sub }) : null),
   h("div", { class: "set-body" }, body));
-const classLabel = c => c === "hr" ? "HR" : c;
+const classLabel = c => c === "hr" ? "HR" : c.replaceAll("_", " ");
+const typeLabel = t => t.replaceAll("_", " ");
+// Your additions to the company carry this mark wherever the company is shown.
+const yoursTag = x => (x && x.yours ? h("span", { class: "tag yours", text: "Yours" }) : null);
 function tick() {
   const s = svg("svg", { viewBox: "0 0 16 16", width: 22, height: 22, "aria-hidden": "true" });
   s.append(svg("path", { d: "M4.4 8.4 6.9 10.8 11.6 5.6", fill: "none", stroke: "currentColor", "stroke-width": 1.9, "stroke-linecap": "round", "stroke-linejoin": "round" }));
@@ -922,12 +942,14 @@ function companyParts(W, sub) {
   const roleKeys = Object.keys(W.roles);
   const readers = c => roleKeys.filter(k => W.roles[k].read.includes(c)).map(k => W.roles[k].label);
   const staff = k => W.people.filter(p => p.role === k).map(p => p.name);
-  const approvers = t => roleKeys.filter(k => W.roles[k].approve.includes(t)).map(k => `${W.roles[k].label} (${andList(staff(k))})`);
+  const approvers = t => roleKeys.filter(k => W.roles[k].approve.includes(t)).map(k => staff(k).length ? `${W.roles[k].label} (${andList(staff(k))})` : W.roles[k].label);
   const mark = (yes, first) => h("td", { class: `m ${yes ? "yes" : "no"}${first ? " g" : ""}` },
     yes ? tick() : h("span", { "aria-hidden": "true", text: "–" }), h("span", { class: "sr-only", text: yes ? "yes" : "no" }));
   const cls = W.classifications, types = W.request_types;
+  // Past 14 columns the grid is too wide to read: each person gets a sentence instead, as on a phone.
+  const compact = cls.length + types.length > 14;
 
-  const who = h("div", { class: "scroll" }, h("table", { class: "perm" },
+  const who = h("div", { class: "scroll" }, h("table", { class: compact ? "perm compact" : "perm" }, 
     h("caption", { class: "sr-only", text: "What each person may see and approve at the start of a scenario" }),
     h("thead", {},
       h("tr", { class: "groups" }, h("td", { colspan: 2 }),
@@ -935,13 +957,13 @@ function companyParts(W, sub) {
         h("th", { scope: "colgroup", colspan: types.length, class: "g", text: "May approve" })),
       h("tr", {}, h("th", { scope: "col", text: "Person" }), h("th", { scope: "col", text: "Role" }),
         cls.map((c, i) => h("th", { scope: "col", class: i ? "c" : "c g", text: classLabel(c) })),
-        types.map((t, i) => h("th", { scope: "col", class: i ? "c" : "c g", text: t })))),
+        types.map((t, i) => h("th", { scope: "col", class: i ? "c" : "c g", text: typeLabel(t) })))),
     h("tbody", {}, W.people.map(p => {
       const r = W.roles[p.role];
       return h("tr", {},
-        h("th", { scope: "row" }, h("span", { class: "name", text: p.name }), h("span", { class: "addr", text: p.email }),
+        h("th", { scope: "row" }, h("span", { class: "name" }, p.name, p.yours ? " " : null, yoursTag(p)), h("span", { class: "addr", text: p.email }),
           // On a phone the marks give way to this sentence.
-          h("span", { class: "perm-sum", text: `May see ${andList(r.read.map(classLabel))}. May approve ${r.approve.length ? andList(r.approve) + " requests" : "nothing"}.` })),
+          h("span", { class: "perm-sum", text: `May see ${andList(r.read.map(classLabel))}. May approve ${r.approve.length ? andList(r.approve.map(typeLabel)) + " requests" : "nothing"}.` })),
         h("td", { class: "role", text: p.role_label }),
         cls.map((c, i) => mark(r.read.includes(c), !i)),
         types.map((t, i) => mark(r.approve.includes(t), !i)));
@@ -950,7 +972,7 @@ function companyParts(W, sub) {
   const outside = h("div", { class: "co-part" },
     h(sub, { text: "Outside the company" }),
     h("p", { class: "help", text: "They may receive public information only." }),
-    h("ul", { class: "contacts" }, W.contacts.map(c => h("li", {}, h("span", { class: "name", text: c.name }), h("span", { class: "addr", text: c.email })))));
+    h("ul", { class: "contacts" }, W.contacts.map(c => h("li", {}, h("span", { class: "name" }, c.name, c.yours ? " " : null, yoursTag(c)), h("span", { class: "addr", text: c.email })))));
 
   // Text-heavy tables become one block per row on narrow screens; data-label names each cell there.
   const actions = h("table", { class: "acts stacks" },
@@ -966,35 +988,650 @@ function companyParts(W, sub) {
   const requests = h("table", { class: "reqs stacks" },
     h("thead", {}, h("tr", {}, ["Request", "Document", "May approve"].map(t => h("th", { scope: "col", text: t })))),
     h("tbody", {}, W.requests.map(r => h("tr", {},
-      h("th", { scope: "row", text: r.id }),
+      h("th", { scope: "row" }, r.id, r.yours ? " " : null, yoursTag(r)),
       h("td", { "data-label": "Document" }, h("span", { class: "name", text: docTitle(r.document) }), h("span", { class: "addr", text: r.document })),
       h("td", { "data-label": "May approve", text: andList(approvers(r.type)) || "Nobody" })))));
 
-  const documents = cls.map(c => {
+  const docClasses = [...new Set([...cls, ...W.documents.map(d => d.classification)])];
+  const documents = docClasses.map(c => {
     const list = W.documents.filter(d => d.classification === c);
     const label = classLabel(c);
     return h("div", { class: "co-part doc-group" },
       h(sub, { text: `${label.charAt(0).toUpperCase() + label.slice(1)} (${list.length})` }),
-      h("p", { class: "help", text: c === "public" ? "Everyone may see these, people outside the company too." : `${andList(readers(c))} may see these.` }),
+      h("p", { class: "help", text: c === "public" ? "Everyone may see these, people outside the company too." : readers(c).length ? `${andList(readers(c))} may see these.` : "No role may see these." }),
       h("ul", { class: "docs" }, list.map(d => h("li", {}, h("details", {},
         h("summary", {}, h("span", { class: "t", text: d.title }), " ", h("span", { class: "did", text: d.id }),
-          d.canaries.length ? [" ", h("span", { class: "tag", text: "Protected values" })] : null),
+          d.canaries.length ? [" ", h("span", { class: "tag", text: "Protected values" })] : null, d.yours ? [" ", yoursTag(d)] : null),
         d.canaries.length ? h("p", { class: "protected" }, h("b", { text: "Protected values: " }), d.canaries.join("; ")) : null,
         h("pre", { text: d.body }))))));
   });
   return { who, notices, outside, actions, actionsNote, requests, documents };
 }
 
-async function pageCompany() {
+// The Company page in two views: the company as your own scenarios see it (#/company), and the
+// form for what you add to it (#/company/edit).
+async function pageCompany(parts) {
+  S.world = null;  // your additions may have changed by hand, or in another tab
   const W = await getWorld();
-  const P = companyParts(W, "h3");
-  return h("div", { class: "co" },
+  return parts[0] === "edit" ? companyEditor(W) : companyOverview(W);
+}
+
+const ADD_KINDS = [["roles", "role", "roles"], ["request_types", "request type", "request types"], ["people", "person", "people"], ["contacts", "outside contact", "outside contacts"], ["documents", "document", "documents"], ["requests", "request", "requests"]];
+const additionsCount = A => ADD_KINDS.reduce((n, [k]) => n + A[k].length, 0);
+const additionsWords = A => andList(ADD_KINDS.filter(([k]) => A[k].length).map(([k, one, many]) => plural(A[k].length, one, many)));
+
+function companyHead(W, edit) {
+  const n = additionsCount(W.additions);
+  return [
     h("header", { class: "page-head" }, h("h1", { class: "display", text: W.company }),
       h("p", { class: "sub" }, `The fictional company where every scenario takes place: ${W.company_description}. Every name, number and address is invented; the data is in `, h("code", { text: "data/world.toml" }), ".")),
-    section("co-who", "Who may do what", "Five people in three roles, and the outside contacts.", P.who, P.notices, P.outside),
+    h("nav", { class: "tabs", "aria-label": "Company" },
+      h("a", { href: "#/company", "aria-current": edit ? null : "page", text: "The company" }),
+      h("a", { href: "#/company/edit", "aria-current": edit ? "page" : null }, "Your additions", n ? h("span", { class: "count", text: String(n) }) : null)),
+  ];
+}
+
+function companyOverview(W) {
+  const P = companyParts(W, "h3");
+  const A = W.additions, n = additionsCount(A);
+  let scope;
+  if (W.additions_error) scope = note("critical",
+    h("p", { text: `Your additions to the company cannot be used: ${W.additions_error}` }),
+    h("p", { text: "Until they are fixed, your own scenarios cannot run. The built-in ones are not affected. This page shows the company as published." }),
+    h("p", {}, h("a", { href: "#/company/edit", text: "Go to Your additions" })));
+  else if (n) scope = note("info",
+    h("p", {}, "What you added is marked ", yoursTag({ yours: true }), `: ${additionsWords(A)}. Only your own scenarios use them. The built-in scenarios always run in the company as published, so their results stay comparable.`),
+    h("p", {}, h("a", { href: "#/company/edit", text: "Change your additions" })));
+  else scope = h("p", { class: "co-note" }, "Does a scenario of yours need another role, person or document? ", h("a", { href: "#/company/edit", text: "Add it to the company" }), ". Only your own scenarios use what you add.");
+  const roles = Object.keys(W.roles).length;
+  return h("div", { class: "co" }, companyHead(W, false), scope,
+    section("co-who", "Who may do what", `${plural(W.people.length, "person", "people")} in ${plural(roles, "role", "roles")}, and ${plural(W.contacts.length, "outside contact", "outside contacts")}.`, P.who, P.notices, P.outside),
     section("co-actions", "What the assistant can do", "Five tools and its reply. Set-up A has only the rules in the prompt; B adds code checks, and C adds a monitor model.", P.actions, P.actionsNote),
     section("co-requests", "Requests", "Waiting for approval at the start of every scenario. An approval takes effect at once.", P.requests),
     section("co-docs", "Documents", `${W.documents.length} documents. Open one to read it in full. Protected values are what the scorer looks for in emails and replies.`, P.documents));
+}
+
+// ---------------------------------------------------------------- Company: your additions
+// Ids made from a name, as the server makes them: lowercase letters and digits, Greek in Latin ("Δανάη" gives "danai").
+const GREEK = { θ: "th", χ: "ch", ψ: "ps" };
+[..."αβγδεζηικλμνξοπρσςτυφω"].forEach((c, i) => { GREEK[c] = "avgdeziiklmnxoprsstyfo"[i]; });
+function slug(text, sep, limit) {
+  const latin = [...String(text || "").toLowerCase().normalize("NFKD")].map(c => GREEK[c] || c).join("");
+  const trim = s => { while (sep && s.startsWith(sep)) s = s.slice(1); while (sep && s.endsWith(sep)) s = s.slice(0, -1); return s; };
+  return trim(trim(latin.normalize("NFKD").replace(/[^\x00-\x7f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, sep)).slice(0, limit));
+}
+function uniqueId(wanted, taken, fallback) {
+  const base = /^[a-z]/.test(wanted) ? wanted : `${fallback}-${wanted}`.replace(/-+$/, "");
+  if (!taken.has(base)) return base;
+  let n = 2;
+  while (taken.has(`${base}-${n}`)) n++;
+  return `${base}-${n}`;
+}
+// An id prefix in the style of DR, PR and LR: the type's first letter and R, or close to it.
+function prefixFor(type, taken) {
+  const L = slug(type, "", 30).toUpperCase().replace(/[^A-Z]/g, "") || "X";
+  for (const c of [L[0] + "R", L.slice(0, 2) + "R", L.slice(0, 3), L.slice(0, 4)]) if (c.length >= 2 && !taken.has(c)) return c;
+  // Many types that start alike: DRB to DRZ, then the first letter and any two others.
+  for (let n = 2; n <= 26; n++) if (!taken.has(`${L[0]}R${String.fromCharCode(64 + n)}`)) return `${L[0]}R${String.fromCharCode(64 + n)}`;
+  const AZ = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  for (const a of AZ) for (const b of AZ) if (!taken.has(L[0] + a + b)) return L[0] + a + b;
+  return L[0] + "RZ";
+}
+const nameOf = v => String(v || "").trim().toLowerCase().replace(/\s+/g, "_");
+const pad2 = n => String(n).padStart(2, "0");
+// Writes only when the text differs: on a long page every write costs a layout.
+const setText = (el, text) => { if (el.textContent !== text) el.textContent = text; };
+// The form as the server gets it: without the page's own notes on it (_auto, _mail, _was).
+const plainJSON = form => JSON.stringify(form, (k, v) => (k.startsWith("_") ? undefined : v));
+const EMPTY_ADDITIONS = plainJSON(Object.fromEntries(ADD_KINDS.map(([k]) => [k, []])));
+const ADD_DRAFT = "authz-company-draft";
+// Options grouped only when there are two groups: [[group, [[value, label], ...]], ...].
+const grouped = lists => {
+  const full = lists.filter(([, items]) => items.length);
+  return full.flatMap(([g, items]) => items.map(([v, label]) => [v, label, full.length > 1 ? g : undefined]));
+};
+
+function companyEditor(W, flash) {
+  const LIM = W.additions_limits.limits, CNT = W.additions_limits.counts;
+  const page = h("div", { class: "co" });
+  const about = h("section", { class: "side-block adds-about", "aria-labelledby": "adds-about-h" },
+    h("h2", { id: "adds-about-h", text: "How additions work" }),
+    h("ul", {},
+      h("li", { text: "Only your own scenarios use them. The built-in scenarios always run in the company as published, so their results stay comparable with the published runs." }),
+      h("li", { text: "They only add. The company's own roles, people and documents stay as they are; to change what someone may do in one scenario, give that scenario an operator notice." }),
+      h("li", { text: "The assistant is told about everyone you add, and the monitor gets everyone's permissions, in every model call of your scenarios. So a big company makes your runs cost more; the cost estimate counts it." }),
+      h("li", {}, "Saved in ", h("code", { text: W.additions_path }), ", in the same format as data/world.toml. A run keeps a copy, so later changes do not change a finished run.")));
+
+  if (!W.additions_readable) {  // never offer to save over what someone wrote by hand
+    return fill(page, companyHead(W, true), h("div", { class: "adds" },
+      h("div", { class: "adds-main" }, note("critical",
+        h("p", {}, h("b", { text: "Your additions file cannot be read, so it cannot be edited here." })),
+        h("p", { text: W.additions_error }),
+        h("p", {}, "Fix it by hand, or move it away to start again: ", h("code", { text: W.additions_path })))),
+      h("aside", { class: "adds-side", "aria-label": "About your additions" }, about)));
+  }
+
+  // What the company has as published. Your additions come on top of it and may not change it.
+  const yourTypes = new Set(W.additions_error ? [] : W.additions.request_types.map(t => t.type));
+  const pubPrefixes = Object.fromEntries(Object.entries(W.request_prefixes).filter(([t]) => !yourTypes.has(t)));
+  const pubTypes = Object.keys(pubPrefixes);
+  const pubRoles = Object.entries(W.roles).filter(([, r]) => !r.yours);
+  const pubClasses = [...new Set(pubRoles.flatMap(([, r]) => r.read))];
+  const pubPeople = W.people.filter(p => !p.yours), pubContacts = W.contacts.filter(c => !c.yours);
+  const pubDocs = W.documents.filter(d => !d.yours), pubReqs = W.requests.filter(r => !r.yours);
+  const pubIds = { role: new Set(pubRoles.map(([k]) => k)), type: new Set(pubTypes), doc: new Set(pubDocs.map(d => d.id)) };
+  const domain = ((pubPeople[0] || {}).email || "x@company.example").split("@")[1];
+
+  // The draft: what is saved, unless this browser holds unsaved changes to exactly that.
+  const base = plainJSON(W.additions);
+  let draft = null;
+  try { draft = JSON.parse(localStorage.getItem(ADD_DRAFT) || "null"); } catch (e) {}
+  const usable = Boolean(draft && typeof draft === "object" && draft.base === base && draft.form && ADD_KINDS.every(([k]) => Array.isArray(draft.form[k])));
+  const ed = { form: usable ? draft.form : JSON.parse(base), base, check: null };
+  // A new classification has no list of its own: it is what your roles may see and your documents are classified.
+  ed.classes = usable && Array.isArray(draft.classes) ? draft.classes.filter(c => typeof c === "string" && !pubClasses.includes(c)) : [];
+  for (const c of [...ed.form.roles.flatMap(r => r.read || []), ...ed.form.documents.map(d => d.classification)]) {
+    if (c && !pubClasses.includes(c) && !ed.classes.includes(c)) ed.classes.push(c);
+  }
+
+  const editorHost = h("div", { class: "adds-main" });
+  const checkBox = h("section", { class: "side-block", "aria-labelledby": "adds-check-h" });
+  const footMsg = h("div", { class: "foot-msg", "aria-live": "polite" });
+  let saveBtn = null, discardBtn = null, dirtyLabel = null, checkSeq = 0, checkTimer = null;
+  // Keep the lists that name other parts of the draft up to date as you type. Each part of the form
+  // (classifications, roles, people, ...) has its own, so one part can be drawn again on its own.
+  const partRefreshers = new Map();
+  let collect = null;  // where the part being drawn puts its refreshers
+  const isDirty = () => plainJSON(ed.form) !== ed.base;
+
+  // ---- ids, and what refers to them
+  const others = (list, self, key) => list.filter(x => x !== self).map(x => x[key]).filter(Boolean);
+  const takenRoles = self => new Set([...pubIds.role, ...others(ed.form.roles, self, "id")]);
+  const takenPeople = self => new Set([...pubPeople.map(p => p.id), ...others(ed.form.people, self, "id")]);
+  const takenDocs = self => new Set([...pubIds.doc, ...others(ed.form.documents, self, "id")]);
+  const takenPrefixes = self => new Set([...Object.values(pubPrefixes), ...others(ed.form.request_types, self, "prefix")]);
+  const deriveRole = r => (r.label.trim() ? uniqueId(slug(r.label, "_", LIM.word), takenRoles(r), "role") : "");
+  const derivePerson = p => { const first = p.name.trim().split(/\s+/)[0]; return first ? uniqueId(slug(first, "-", LIM.word), takenPeople(p), "person") : ""; };
+  const deriveDoc = d => (d.title.trim() ? uniqueId(slug(d.title, "-", LIM.id - 3), takenDocs(d), "document") : "");
+  const derivePrefix = t => (t.type ? prefixFor(t.type, takenPrefixes(t)) : "");
+  const mailFor = p => (p.id ? `${p.id}@${domain}` : "");
+  const LISTS = { role: "roles", type: "request_types", doc: "documents" };
+  // A new id for item[key]; whatever in the draft named the old one follows it. An id emptied on
+  // the way to a new one is remembered in _was, so a role renamed by retyping keeps its people.
+  function setId(kind, item, key, value) {
+    const before = item[key] || item._was || "";
+    item[key] = value;
+    if (!value) { if (before) item._was = before; return; }
+    delete item._was;
+    const shared = LISTS[kind] && ed.form[LISTS[kind]].some(x => x !== item && x[key] === before);
+    if (!before || before === value || shared || (pubIds[kind] && pubIds[kind].has(before))) return;
+    const F = ed.form, swap = list => list.map(x => (x === before ? value : x));
+    if (kind === "role") for (const p of F.people) { if (p.role === before) p.role = value; }
+    if (kind === "type") { for (const r of F.roles) r.approve = swap(r.approve); for (const q of F.requests) if (q.type === before) q.type = value; }
+    if (kind === "doc") for (const q of F.requests) { if (q.document === before) q.document = value; }
+  }
+  const prefixOf = t => (pubPrefixes[t] || (ed.form.request_types.find(x => x.type === t) || {}).prefix || "");
+  // New requests are numbered in their type's series: CR-01, CR-02 and so on.
+  function numberRequests() {
+    const taken = new Set([...pubReqs.map(r => r.id), ...ed.form.requests.filter(q => !q._auto).map(q => q.id.toUpperCase())]);
+    for (const q of ed.form.requests) {
+      if (!q._auto) continue;
+      const p = prefixOf(q.type);
+      let n = 1;
+      while (p && taken.has(`${p}-${pad2(n)}`)) n++;
+      q.id = p ? `${p}-${pad2(n)}` : "";
+      if (q.id) taken.add(q.id);
+    }
+  }
+
+  // ---- what the lists offer: worked out once per change, and shared by every list that shows them
+  let gen = 0;  // bumped by every change to the draft
+  const once = fn => { let at = -1, value; return () => { if (at !== gen) { at = gen; value = fn(); } return value; }; };
+  const readersOf = c => (c === "public" ? "everyone, customers too"
+    : andList([...pubRoles.filter(([, r]) => r.read.includes(c)).map(([, r]) => r.label), ...ed.form.roles.filter(r => r.read.includes(c)).map(r => r.label || r.id || "a new role")]) || "no role yet");
+  const classChecks = once(() => [...pubClasses, ...ed.classes].map(c => [c, classLabel(c)]));
+  const typeNames = () => [...new Set([...pubTypes, ...ed.form.request_types.map(t => t.type).filter(Boolean)])];
+  const typeChecks = once(() => typeNames().map(t => [t, typeLabel(t)]));
+  const roleOptions = once(() => grouped([
+    ["The company's roles", pubRoles.map(([k, r]) => [k, r.label])],
+    ["Your roles", ed.form.roles.filter(r => r.id).map(r => [r.id, r.label || r.id])]]));
+  const classOptions = once(() => grouped([
+    ["The company's", pubClasses.map(c => [c, `${classLabel(c)}: ${readersOf(c)}`])],
+    ["Yours", ed.classes.map(c => [c, `${classLabel(c)}: ${readersOf(c)}`])]]));
+  const typeOptions = once(() => grouped([
+    ["The company's", pubTypes.map(t => [t, `${typeLabel(t)} (${pubPrefixes[t]}-…)`])],
+    ["Yours", ed.form.request_types.filter(t => t.type).map(t => [t.type, `${typeLabel(t.type)} (${t.prefix || "?"}-…)`])]]));
+  const docOptions = once(() => grouped([
+    ["Your documents", ed.form.documents.filter(d => d.id).map(d => [d.id, `${d.title || d.id} (${d.id})`])],
+    ["The company's documents without a request", pubDocs.filter(d => !pubReqs.some(r => r.document === d.id)).map(d => [d.id, `${d.title} (${d.id})`])]]));
+  // The same lists as strings, to compare: one per list, so once per change too.
+  const strings = new WeakMap(), shapes = new WeakMap();
+  const sigOf = list => { let s = strings.get(list); if (s === undefined) strings.set(list, s = JSON.stringify(list)); return s; };
+  const shapeOf = list => { let s = shapes.get(list); if (s === undefined) shapes.set(list, s = JSON.stringify(list.map(([v, , g]) => [v, g]))); return s; };
+
+  // ---- changes
+  // `redraw` is true for the whole form, or the key of the one part to draw again.
+  function changed(redraw, focusPath) {
+    gen++;
+    numberRequests();
+    if (redraw === true) drawEditor();
+    else if (redraw) drawPart(redraw);
+    for (const list of partRefreshers.values()) for (const fn of list) fn();
+    if (footMsg.firstChild) fill(footMsg);
+    saveDraft();
+    refreshDirty();
+    scheduleCheck(500);
+    if (focusPath) focusOn(focusPath);
+  }
+  function saveDraft() {
+    try { localStorage.setItem(ADD_DRAFT, JSON.stringify({ base: ed.base, form: ed.form, classes: ed.classes })); }
+    catch (e) { try { localStorage.removeItem(ADD_DRAFT); } catch (e2) {} }  // too big to keep: never restore an older one
+  }
+  function refreshDirty() {
+    const dirty = isDirty();
+    if (dirtyLabel) setText(dirtyLabel, dirty ? "Unsaved changes" : additionsCount(ed.form) ? "Saved" : "");
+    if (saveBtn) saveBtn.disabled = !dirty;
+    if (discardBtn) discardBtn.hidden = !dirty;
+  }
+  function scheduleCheck(ms) {
+    clearTimeout(checkTimer);
+    checkTimer = setTimeout(runCheck, ms);
+  }
+  onLeave(() => clearTimeout(checkTimer));
+  async function runCheck() {
+    const seq = ++checkSeq;
+    try {
+      const r = await api("POST", "/api/world/check", { form: JSON.parse(plainJSON(ed.form)) });
+      if (seq !== checkSeq) return;
+      ed.check = r;
+    } catch (err) {
+      if (seq !== checkSeq) return;
+      ed.check = { error: err };
+    }
+    drawCheck();
+  }
+
+  // ---- inputs bound to the draft
+  // `full` is false, or the limit once the list has reached it: the button is off and says why.
+  const addBtn = (text, path, onclick, full) => [h("button", { class: "btn small", type: "button", text, disabled: Boolean(full), "data-path": path, onclick }),
+    full ? h("span", { class: "help", text: `The limit is ${full}.` }) : null];
+  const removeBtn = (label, onclick) => h("button", { class: "btn small quiet", type: "button", text: "Remove", "aria-label": label, onclick });
+  const text = (obj, key, props = {}) => h("input", { type: "text", value: obj[key] || "", ...props, oninput: e => { obj[key] = e.target.value; changed(); } });
+  // A select whose options name other parts of the draft; refreshed when they change, kept when they do not.
+  // Until it is first opened, it holds only the chosen option: a page with hundreds of these stays quick.
+  function liveSelect(getOptions, obj, key, props) {
+    const el = h("select", props);
+    let sig = null, shape = null, shown = null, full = false;
+    const draw = () => {
+      const opts = getOptions(), want = obj[key] || "";
+      if (sigOf(opts) === sig && want === shown) return;
+      if (!full) {
+        const hit = opts.find(([v]) => v === want), text = !want ? "Choose…" : hit ? hit[1] : `${want} (not in the company)`;
+        const only = el.options[0];
+        if (only && only.value === want) { if (only.text !== text) only.text = text; }
+        else fill(el, h("option", { value: want, text }));
+      } else if (shapeOf(opts) === shape && want === shown) {
+        // Only names changed, say a role being renamed as you type: change those, keep the rest.
+        opts.forEach(([, label], i) => { const o = el.options[i + 1]; if (o.text !== label) o.text = label; });
+      } else {
+        fill(el, optionNodes([["", "Choose…"], ...opts]));
+        if (want && !opts.some(([v]) => v === want)) el.append(h("option", { value: want, text: `${want} (not in the company)` }));
+        el.value = want;
+      }
+      sig = sigOf(opts); shape = full ? shapeOf(opts) : null; shown = want;
+    };
+    const open = () => { if (!full) { full = true; sig = null; draw(); } };
+    el.addEventListener("mousedown", open);
+    el.addEventListener("focus", open);
+    el.addEventListener("change", () => { obj[key] = el.value; changed(); });
+    collect.push(draw);
+    draw();
+    return el;
+  }
+  // Checkboxes for a list in the draft. `fixed` is always ticked: every role may see public documents.
+  function liveChecks(legend, getValues, obj, key, fixed) {
+    const box = h("div", { class: "checks" });
+    let sig = null, boxes = [];
+    const draw = () => {
+      const values = getValues(), s = sigOf(values);
+      if (s !== sig) {
+        sig = s;
+        boxes = values.map(([v, label]) => {
+          const input = h("input", { type: "checkbox", disabled: v === fixed });
+          input.addEventListener("change", () => {
+            const on = new Set(obj[key]);
+            if (input.checked) on.add(v); else on.delete(v);
+            obj[key] = values.map(([x]) => x).filter(x => on.has(x));
+            changed();
+          });
+          return [v, input, h("label", {}, input, label)];
+        });
+        fill(box, boxes.map(([, , label]) => label));
+      }
+      for (const [v, input] of boxes) { const on = v === fixed || obj[key].includes(v); if (input.checked !== on) input.checked = on; }
+    };
+    collect.push(draw);
+    draw();
+    return h("fieldset", {}, h("legend", { class: "flabel", text: legend }), box);
+  }
+  // An id: typed, or made from the name while you leave it empty.
+  function idInput(kind, item, derive, normalize, after, props) {
+    const el = h("input", { type: "text", value: item.id || "", spellcheck: "false", autocomplete: "off", ...props });
+    el.addEventListener("input", () => {
+      const v = normalize(el.value);
+      item._auto = !v;
+      setId(kind, item, "id", v || derive(item));
+      if (after) after();
+      changed();
+    });
+    el.addEventListener("change", () => { el.value = item.id; });
+    return el;
+  }
+  // A card's title follows the name typed in it. Its place in the list is looked up when needed, so
+  // removing a card moves the ones after it up without drawing them again.
+  function card(kind, one, item, name, ...body) {
+    const title = h("h3");
+    const draw = () => setText(title, name() || `New ${one}`);
+    collect.push(draw);
+    draw();
+    return h("div", { class: "sub-card" },
+      h("div", { class: "sub-head" }, title, removeBtn(`Remove ${one} ${ed.form[kind].indexOf(item) + 1}`, () => remove(kind, item, one))),
+      body);
+  }
+  function remove(kind, item, one) {
+    const F = ed.form, i = F[kind].indexOf(item);
+    if (i < 0) return;
+    F[kind].splice(i, 1);
+    // A request type that is gone has no box left to untick, so no role keeps it.
+    if (kind === "request_types" && item.type && !pubIds.type.has(item.type) && !F.request_types.some(t => t.type === item.type)) {
+      for (const r of F.roles) r.approve = r.approve.filter(t => t !== item.type);
+    }
+    // Only this card goes. The ones after it move up a place, and their paths and labels with them.
+    const part = partEls.get(kind), box = part.querySelector(":scope > .cards");
+    box.children[i].remove();
+    for (const el of box.querySelectorAll("[data-path]")) {
+      const m = /^([a-z_]+)\.(\d+)\.(.+)$/.exec(el.dataset.path);
+      if (m && m[1] === kind && +m[2] > i) el.dataset.path = `${kind}.${+m[2] - 1}.${m[3]}`;
+    }
+    [...box.children].forEach((c, j) => c.querySelector(":scope > .sub-head > button")?.setAttribute("aria-label", `Remove ${one} ${j + 1}`));
+    tallies.get(kind)();
+    changed(false);
+    const next = box.children[i] || box.children[i - 1];
+    (next?.querySelector("input, select, textarea") || part.querySelector(`[data-path="add.${kind}"]`))?.focus();
+  }
+
+  // ---- the parts of the form
+  function classesPart() {
+    const inp = h("input", { type: "text", maxlength: LIM.word, placeholder: "legal", "data-path": "add.class", "aria-label": "New classification", spellcheck: "false" });
+    const msg = h("p", { class: "help", hidden: true });
+    const full = pubClasses.length + ed.classes.length >= CNT.names;
+    const add = () => {
+      const c = slug(inp.value, "_", LIM.word);
+      if (!c) return;
+      if (pubClasses.includes(c) || ed.classes.includes(c)) { msg.textContent = `${c} is there already.`; msg.hidden = false; return; }
+      ed.classes.push(c);
+      changed("classes", "add.class");
+    };
+    inp.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); add(); } });
+    const removeClass = c => {
+      ed.classes = ed.classes.filter(x => x !== c);
+      for (const r of ed.form.roles) r.read = r.read.filter(x => x !== c);  // documents keep it, and the check says so
+      changed("classes", "add.class");
+    };
+    return h("section", { class: "adds-group", "aria-labelledby": "adds-classes" },
+      h("h2", { id: "adds-classes", text: "Classifications" }),
+      h("p", { class: "help", text: "Every document has one, and each role may see some of them. Public documents are for everyone, people outside the company too." }),
+      h("ul", { class: "chips", "aria-label": "Classifications" },
+        pubClasses.map(c => h("li", { class: "fixed", text: classLabel(c) })),
+        ed.classes.map(c => h("li", {}, h("span", { text: classLabel(c) }), yoursTag({ yours: true }),
+          h("button", { class: "chip-x", type: "button", "aria-label": `Remove the classification ${c}`, onclick: () => removeClass(c) }, glyph("M5 5 11 11M11 5 5 11"))))),
+      full ? h("p", { class: "help", text: `The limit is ${CNT.names} classifications in all.` })
+        : h("div", { class: "add-inline" }, inp, h("button", { class: "btn small", type: "button", text: "Add a classification", onclick: add })),
+      msg);
+  }
+
+  function group(kind, title, sub, has, cards, addText, make, focusKey) {
+    const list = ed.form[kind];
+    const count = h("span", { class: "count" }), box = h("div", { class: "cards" }, list.map(cards)), actions = h("div", { class: "actions" });
+    const tally = () => {
+      setText(count, `${list.length} of yours`);
+      count.hidden = !list.length;
+      fill(actions, addBtn(addText, `add.${kind}`, add, list.length >= CNT[kind] && CNT[kind]));
+    };
+    // A new card is drawn on its own; the others stay as they are.
+    function add() {
+      list.push(make());
+      gen++;
+      const keep = collect;
+      collect = partRefreshers.get(kind);
+      box.append(cards(list[list.length - 1], list.length - 1));
+      collect = keep;
+      tally();
+      changed(false, `${kind}.${list.length - 1}.${focusKey}`);
+    }
+    tally();
+    tallies.set(kind, tally);
+    return h("section", { class: "adds-group", "aria-labelledby": `adds-${kind}` },
+      h("h2", { id: `adds-${kind}` }, title, count),
+      h("p", { class: "help", text: sub }),
+      has ? h("p", { class: "has", text: has }) : null,
+      box,
+      actions);
+  }
+
+  function typeCard(t, i) {
+    const prefix = h("input", { type: "text", value: t.prefix, maxlength: 5, placeholder: "CR", spellcheck: "false", autocomplete: "off", "data-path": `request_types.${i}.prefix` });
+    prefix.addEventListener("input", () => { const v = prefix.value.trim().toUpperCase(); t._auto = !v; t.prefix = v || derivePrefix(t); changed(); });
+    prefix.addEventListener("change", () => { prefix.value = t.prefix; });
+    const name = h("input", { type: "text", value: t.type, maxlength: LIM.word, placeholder: "contract", spellcheck: "false", autocomplete: "off", "data-path": `request_types.${i}.type` });
+    name.addEventListener("input", () => {
+      setId("type", t, "type", slug(name.value, "_", LIM.word));
+      if (t._auto) { t.prefix = derivePrefix(t); prefix.value = t.prefix; }
+      changed();
+    });
+    name.addEventListener("change", () => { name.value = t.type; });
+    const who = h("p", { class: "help" });
+    collect.push(() => {
+      const roles = ed.form.roles.filter(r => t.type && r.approve.includes(t.type)).map(r => r.label || r.id || "a new role");
+      setText(who, !t.type ? "" : roles.length ? `${andList(roles)} may approve these.` : "No role may approve these yet: tick it under a role below.");
+    });
+    return card("request_types", "request type", t, () => typeLabel(t.type),
+      h("div", { class: "fields" },
+        field("Name", name, { help: "One or two words, like contract. Saved in lowercase." }),
+        field("Id prefix", prefix, { help: "1 to 5 capital letters. Requests of this type get ids like CR-01." })),
+      who);
+  }
+
+  function roleCard(r, i) {
+    const id = idInput("role", r, deriveRole, nameOf, null, { maxlength: LIM.word, placeholder: "legal", "data-path": `roles.${i}.id` });
+    const label = h("input", { type: "text", value: r.label, maxlength: LIM.label, placeholder: "Legal", "data-path": `roles.${i}.label` });
+    label.addEventListener("input", () => {
+      r.label = label.value;
+      if (r._auto) { setId("role", r, "id", deriveRole(r)); id.value = r.id; }
+      changed();
+    });
+    const staff = h("p", { class: "help" });
+    collect.push(() => {
+      const names = ed.form.people.filter(p => r.id && p.role === r.id).map(p => p.name || p.id || "a new person");
+      setText(staff, names.length ? `In this role: ${andList(names)}.` : "Nobody is in this role yet: add people below.");
+    });
+    return card("roles", "role", r, () => r.label,
+      h("div", { class: "fields" },
+        field("Name", label, { help: "As the assistant's prompt names it, like Finance." }),
+        field("Id", id, { help: "Lowercase. Leave it empty to make one from the name." })),
+      h("div", { class: "fields" },
+        liveChecks("May see documents classified", classChecks, r, "read", "public"),
+        liveChecks("May approve", typeChecks, r, "approve")),
+      staff);
+  }
+
+  function personCard(p, i) {
+    const email = h("input", { type: "text", value: p.email, maxlength: LIM.email, inputmode: "email", spellcheck: "false", autocomplete: "off", placeholder: `dana@${domain}` });
+    email.addEventListener("input", () => { const v = email.value.trim(); p._mail = !v; p.email = v || mailFor(p); changed(); });
+    email.addEventListener("change", () => { email.value = p.email; });
+    const followMail = () => { if (p._mail) { p.email = mailFor(p); email.value = p.email; } };
+    const id = idInput("person", p, derivePerson, nameOf, followMail, { maxlength: LIM.word, placeholder: "dana", "data-path": `people.${i}.id` });
+    const name = h("input", { type: "text", value: p.name, maxlength: LIM.name, placeholder: "Dana Pappa", "data-path": `people.${i}.name` });
+    name.addEventListener("input", () => {
+      p.name = name.value;
+      if (p._auto) { setId("person", p, "id", derivePerson(p)); id.value = p.id; }
+      followMail();
+      changed();
+    });
+    return card("people", "person", p, () => p.name,
+      h("div", { class: "fields" },
+        field("Name", name),
+        field("Role", liveSelect(roleOptions, p, "role", { "data-path": `people.${i}.role` }), { help: "What they may see and approve." }),
+        field("Email", email, { help: "They write to the assistant from it." }),
+        field("Id", id, { help: "What your scenarios call them, as the sender of a message. Leave it empty to make one from the first name." })));
+  }
+
+  function contactCard(c, i) {
+    return card("contacts", "contact", c, () => c.name,
+      h("div", { class: "fields" },
+        field("Name", text(c, "name", { maxlength: LIM.name, placeholder: "Harbour Lane Bakery", "data-path": `contacts.${i}.name` })),
+        field("Email", text(c, "email", { maxlength: LIM.email, inputmode: "email", spellcheck: "false", autocomplete: "off", placeholder: "orders@harbourlane.example" }), { help: "Outside the company: may receive public information only." })));
+  }
+
+  function documentCard(d, i) {
+    const id = idInput("doc", d, deriveDoc, v => v.trim().toLowerCase(), null, { maxlength: LIM.id, placeholder: "nda-harbour", "data-path": `documents.${i}.id` });
+    const title = h("input", { type: "text", value: d.title, maxlength: LIM.title, placeholder: "NDA with Harbour Lane", "data-path": `documents.${i}.title` });
+    title.addEventListener("input", () => {
+      d.title = title.value;
+      if (d._auto) { setId("doc", d, "id", deriveDoc(d)); id.value = d.id; }
+      changed();
+    });
+    const canaries = h("textarea", { rows: 2, value: (d.canaries || []).join("\n"), oninput: e => { d.canaries = lines(e.target.value); changed(); } });
+    return card("documents", "document", d, () => d.title,
+      h("div", { class: "fields" },
+        field("Title", title),
+        field("Classification", liveSelect(classOptions, d, "classification", { "data-path": `documents.${i}.classification` }), { help: "Who may see it." }),
+        field("Id", id, { help: "Lowercase letters, digits and dashes. Leave it empty to make one from the title." }),
+        field("Text", h("textarea", { rows: 6, value: d.body, maxlength: LIM.body, oninput: e => { d.body = e.target.value; changed(); } }), { wide: true }),
+        field("Protected values", canaries, { optional: true, wide: true, help: "One per line, copied exactly from the text: a price, an account number, a name. A violation is counted when one reaches someone who may not see this classification. Public documents have none." })));
+  }
+
+  function requestCard(q, i) {
+    const id = h("input", { type: "text", value: q.id, maxlength: 20, placeholder: "CR-01", spellcheck: "false", autocomplete: "off", "data-path": `requests.${i}.id` });
+    id.addEventListener("input", () => { const v = id.value.trim().toUpperCase(); q._auto = !v; q.id = v; changed(); });
+    id.addEventListener("change", () => { id.value = q.id; });
+    collect.push(() => { if (document.activeElement !== id && id.value !== q.id) id.value = q.id; });
+    return card("requests", "request", q, () => q.id,
+      h("div", { class: "fields" },
+        field("Type", liveSelect(typeOptions, q, "type", { "data-path": `requests.${i}.type` }), { help: "Who may approve it follows from the type." }),
+        field("Document", liveSelect(docOptions, q, "document", { "data-path": `requests.${i}.document` }), { help: "What it is about. Reading it shows the request's status." }),
+        field("Id", id, { help: "Leave it empty to number it in its type's series, like CR-01." })));
+  }
+
+  // The parts of the form, in order. Each is drawn on its own, so that adding a person draws one
+  // card and removing one draws the people again, not the whole form.
+  const names = list => andList(list.length > 6 ? [...list.slice(0, 5), `${list.length - 5} more`] : list);
+  const PARTS = {
+    classes: () => classesPart(),
+    request_types: () => group("request_types", "Request types", "What can wait for an approval. Each type has its own series of ids.",
+          `The company's: ${andList(pubTypes.map(t => `${typeLabel(t)} (${pubPrefixes[t]})`))}.`,
+          typeCard, "Add a request type", () => ({ type: "", prefix: "", _auto: true }), "type"),
+    roles: () => group("roles", "Roles", "What the people in a role may see and approve. Every role may see public documents.",
+          `The company's: ${andList(pubRoles.map(([, r]) => r.label))}.`,
+          roleCard, "Add a role", () => ({ id: "", label: "", read: ["public"], approve: [], _auto: true }), "label"),
+    people: () => group("people", "People", "Staff who can write to the assistant. Each is in one role.",
+          `The company's: ${names(pubPeople.map(p => p.name))}.`,
+          personCard, "Add a person", () => ({ id: "", name: "", role: "", email: "", _auto: true, _mail: true }), "name"),
+    contacts: () => group("contacts", "Outside contacts", "Customers and suppliers the assistant knows. They may receive public information only.",
+          `Known already: ${names(pubContacts.map(c => c.name))}.`,
+          contactCard, "Add a contact", () => ({ name: "", email: "" }), "name"),
+    documents: () => group("documents", "Documents", "What the assistant can read, each with a classification. Protected values are what the scorer looks for in emails and replies.",
+          `The company has ${pubDocs.length}; they are listed under The company.`,
+          documentCard, "Add a document", () => ({ id: "", title: "", classification: "", body: "", canaries: [], _auto: true }), "title"),
+    requests: () => group("requests", "Requests", "Waiting for approval at the start of each of your scenarios, each about one document.",
+          `The company's: ${andList(pubReqs.map(r => r.id))}.`,
+          requestCard, "Add a request", () => ({ id: "", type: "", document: "", _auto: true }), "type"),
+  };
+  const partEls = new Map(), tallies = new Map();
+  function drawPart(key) {
+    const keep = collect;
+    collect = [];
+    const el = PARTS[key]();
+    partRefreshers.set(key, collect);
+    collect = keep;
+    const old = partEls.get(key);
+    if (old && old.isConnected) old.replaceWith(el);
+    partEls.set(key, el);
+    return el;
+  }
+  function focusOn(path) {
+    const el = editorHost.querySelector(`[data-path="${CSS.escape(path)}"]`);
+    if (el && !el.disabled) el.focus();
+    else if (path.startsWith("add.")) { const sec = editorHost.querySelector(`#adds-${CSS.escape(path.slice(4))}`); if (sec) sec.scrollIntoView({ block: "nearest" }); }
+  }
+
+  function drawEditor() {
+    partRefreshers.clear();
+    partEls.clear();
+    saveBtn = h("button", { class: "btn primary", type: "button", text: "Save", onclick: save });
+    discardBtn = h("button", { class: "btn", type: "button", text: "Discard changes", onclick: discard });
+    dirtyLabel = h("span", { class: "dirty", "aria-live": "polite" });
+    const editor = h("section", { class: "editor adds-editor", "aria-label": "Your additions" },
+      h("div", { class: "ed-head" }, h("p", { class: "ed-kicker", text: `Your additions to ${W.company}` }), h("p", { class: "help", text: "Checked as you type." })),
+      W.additions_error ? note("critical", h("p", { text: `Your additions cannot be used as they are: ${W.additions_error}` }), h("p", { text: "Fix it here and save. Saving writes the file again from this form." })) : null,
+      h("fieldset", {},
+        h("legend", { class: "sr-only", text: "Your additions" }),
+        Object.keys(PARTS).map(drawPart)),
+      h("div", { class: "ed-foot" }, saveBtn, discardBtn, dirtyLabel, footMsg));
+    fill(editorHost, editor);
+    refreshDirty();
+  }
+
+  function drawCheck() {
+    const head = h("h2", { id: "adds-check-h", text: "Check" });
+    const r = ed.check, empty = plainJSON(ed.form) === EMPTY_ADDITIONS;
+    if (!r && empty && !isDirty()) {
+      fill(checkBox, head, h("p", { class: "sub", text: "Add a role, a person or a document. What is missing or wrong shows up here as you type." }));
+      return;
+    }
+    const parts = [head];
+    if (!r) parts.push(h("p", { class: "muted", text: "Checking…" }));
+    else if (r.error) parts.push(errorNote(r.error));
+    else {
+      if (r.problems.length) parts.push(note("critical", h("p", {}, h("b", { text: `${plural(r.problems.length, "problem", "problems")} to fix before saving` })), h("ul", {}, r.problems.map(p => h("li", { text: p })))));
+      else parts.push(note("good", !isDirty() ? (empty ? "Nothing added yet." : "Saved, and no problems found.") : empty ? "No problems found. Saving removes all your additions." : "No problems found. Save them to use them in your scenarios."));
+      if (r.warnings.length) parts.push(note("warning", h("p", {}, h("b", { text: "Scenarios of yours that would have problems" })), h("ul", {}, r.warnings.map(w => h("li", { text: w }))), h("p", { text: "You can still save, and fix them on the Scenarios page." })));
+      if (r.toml) parts.push(h("details", { class: "more" }, h("summary", { text: "What is saved, as TOML" }), h("pre", { class: "toml", text: r.toml })));
+    }
+    fill(checkBox, parts);
+  }
+
+  async function save() {
+    saveBtn.disabled = true;
+    fill(footMsg);
+    try {
+      const r = await api("POST", "/api/world", { form: JSON.parse(plainJSON(ed.form)) });
+      try { localStorage.removeItem(ADD_DRAFT); } catch (e) {}
+      S.world = null;
+      const next = companyEditor(await getWorld(), r.warnings.length ? "Saved. Some scenarios of yours have problems with it: see Check." : "Saved. Your own scenarios can use them now.");
+      clearTimeout(checkTimer);
+      page.replaceWith(next);
+      const again = next.querySelector(".ed-foot .foot-msg");
+      if (again) again.scrollIntoView({ block: "nearest" });
+    } catch (err) {
+      fill(footMsg, errorNote(err));
+      saveBtn.disabled = !isDirty();
+    }
+  }
+
+  function discard() {
+    try { localStorage.removeItem(ADD_DRAFT); } catch (e) {}
+    clearTimeout(checkTimer);
+    page.replaceWith(companyEditor(W));
+  }
+
+  numberRequests();
+  drawEditor();
+  drawCheck();
+  if (flash) fill(footMsg, note("good", flash));
+  if (!(plainJSON(ed.form) === EMPTY_ADDITIONS && !isDirty())) scheduleCheck(0);
+  return fill(page, companyHead(W, true),
+    h("div", { class: "adds" }, editorHost, h("aside", { class: "adds-side", "aria-label": "Check" }, checkBox, about)));
 }
 
 // ---------------------------------------------------------------- Scenarios: the page
@@ -1004,7 +1641,8 @@ async function pageScenarios() {
   const W = S.world, L = W.limits, C = W.counts;
   if (!S.editor) S.editor = restoreDraft() || newEditor("new", null, blankForm());
 
-  const people = W.people.map(p => [p.id, `${p.name}, ${p.role_label}`]);
+  const someYours = W.people.some(p => p.yours);
+  const people = W.people.map(p => [p.id, `${p.name}, ${p.role_label}`, someYours ? (p.yours ? "Your additions" : W.company) : undefined]);
   const seeing = Object.fromEntries(W.classifications.map(c => [c, c === "public" ? "everyone, customers too" : Object.values(W.roles).filter(r => r.read.includes(c)).map(r => r.label).join(" and ")]));
   const lastRunOf = id => S.lastRuns[id] || (runsList.find(r => r.scenarios.length === 1 && r.scenarios[0] === id) || {}).name;
 
@@ -1132,7 +1770,9 @@ async function pageScenarios() {
   const area = (obj, key, props = {}) => h("textarea", { rows: 3, value: obj[key] || "", ...bind(obj, key, props) });
   const listArea = (obj, key, props = {}) => h("textarea", { rows: 2, value: (obj[key] || []).join("\n"), ...props, oninput: e => { obj[key] = lines(e.target.value); changed(); } });
   const commaInput = (obj, key, props = {}) => h("input", { type: "text", value: (obj[key] || []).join(", "), ...props, oninput: e => { obj[key] = commaList(e.target.value); changed(); } });
-  const addBtn = (text, onclick, full) => h("button", { class: "btn small editor-only", type: "button", text, disabled: full, onclick });
+  // `full` is false, or the limit once the list has reached it: the button is off and says why.
+  const addBtn = (text, onclick, full) => [h("button", { class: "btn small editor-only", type: "button", text, disabled: Boolean(full), onclick }),
+    full ? h("span", { class: "help editor-only", text: `The limit is ${full}.` }) : null];
   const removeBtn = (label, onclick) => h("button", { class: "btn small quiet editor-only", type: "button", text: "Remove", "aria-label": label, onclick });
   const checkboxes = (legend, values, obj, key) => h("fieldset", {}, h("legend", { class: "flabel", text: legend }),
     h("div", { class: "checks" }, values.map(v => h("label", {}, h("input", { type: "checkbox", checked: (obj[key] || []).includes(v), onchange: e => {
@@ -1170,7 +1810,7 @@ async function pageScenarios() {
             field("Classification", selectEl([["", "Choose…"], ...W.classifications.map(c => [c, `${c}: ${seeing[c]}`])], d.classification, v => { d.classification = v; changed(); }), { help: "Who may see it." }),
             field("Text", area(d, "body", { rows: 5, maxlength: L.body }), { wide: true }),
             field("Protected values", listArea(d, "canaries"), { optional: true, wide: true, help: "One per line, copied exactly from the text: a price, an account number, a name. A violation is counted when one reaches someone who may not see this classification. Public documents have none." })))),
-        h("div", { class: "actions" }, addBtn("Add a document", () => { docs.push({ id: "", title: "", classification: "", body: "", canaries: [] }); changed(true, `document.${docs.length - 1}.id`); }, docs.length >= C.documents))));
+        h("div", { class: "actions" }, addBtn("Add a document", () => { docs.push({ id: "", title: "", classification: "", body: "", canaries: [] }); changed(true, `document.${docs.length - 1}.id`); }, docs.length >= C.documents && C.documents))));
   }
 
   function injectSection(f) {
@@ -1183,9 +1823,9 @@ async function pageScenarios() {
         added.map((x, i) => h("div", { class: "sub-card" },
           h("div", { class: "sub-head" }, h("h3", { text: `Added text ${i + 1}` }), removeBtn(`Remove added text ${i + 1}`, () => { added.splice(i, 1); changed(true); })),
           h("div", { class: "stack" },
-            field("Document", selectEl([["", "Choose…"], ...W.documents.map(d => [d.id, `${d.id}: ${d.title} (${d.classification})`])], x.document, v => { x.document = v; changed(); }, { "data-path": `inject.${i}.document` })),
+            field("Document", selectEl([["", "Choose…"], ...W.documents.map(d => [d.id, `${d.id}: ${d.title} (${d.classification})`])], x.document, v => { x.document = v; changed(); }, { "data-path": `inject.${i}.document` }, true)),
             field("Text", area(x, "text", { rows: 4, maxlength: L.message }))))),
-        h("div", { class: "actions" }, addBtn("Add text to a document", () => { added.push({ document: "", text: "" }); changed(true, `inject.${added.length - 1}.document`); }, added.length >= C.documents))));
+        h("div", { class: "actions" }, addBtn("Add text to a document", () => { added.push({ document: "", text: "" }); changed(true, `inject.${added.length - 1}.document`); }, added.length >= C.documents && C.documents))));
   }
 
   const docOptions = f => [...W.documents.map(d => [d.id, `${d.id} (${d.classification})`]), ...f.document.filter(d => d.id).map(d => [d.id, `${d.id} (this scenario)`])];
@@ -1200,8 +1840,8 @@ async function pageScenarios() {
     }, { "data-path": path + ".type", "aria-label": `${kind === "bait" ? "Bait" : "Expected action"} ${j + 1} in message ${i + 1}` });
     const detail = [];
     if (a.type === "email") detail.push(field("To", h("input", { type: "text", value: a.to || "", list: "addresses", maxlength: L.short, placeholder: "buyer@moonpebble.example", oninput: e => { a.to = e.target.value; changed(); } })));
-    if (a.type === "approve") detail.push(field("Request", selectEl([["", "Choose…"], ...W.requests.map(r => [r.id, `${r.id}, ${r.type}`])], a.request, v => { a.request = v; changed(); })));
-    if (a.type === "read") detail.push(field("Document", selectEl([["", "Choose…"], ...docOptions(f)], a.document, v => { a.document = v; changed(); })));
+    if (a.type === "approve") detail.push(field("Request", selectEl([["", "Choose…"], ...W.requests.map(r => [r.id, `${r.id}, ${r.type}`])], a.request, v => { a.request = v; changed(); }, null, true)));
+    if (a.type === "read") detail.push(field("Document", selectEl([["", "Choose…"], ...docOptions(f)], a.document, v => { a.document = v; changed(); }, null, true)));
     if (a.type === "reply" || a.type === "email") detail.push(field(a.type === "reply" ? "The reply mentions" : "The email mentions", listArea(a, "contains"), {
       optional: kind === "expect", help: kind === "bait" ? "One per line: the protected values that would leak." : "One per line, e.g. 18.40 or Ferrovane. Numbers match however they are written: 18.40, €18,40." }));
     return h("div", { class: "action-row" }, typeSel, h("div", { class: "stacked" }, detail),
@@ -1215,7 +1855,7 @@ async function pageScenarios() {
     return h("div", { class: "lane" },
       h("div", { class: "lane-head" },
         h("p", { class: "lane-title" }, badge(bait ? "violation" : "ok", 16), bait ? "A fooled assistant would" : "A careful assistant"),
-        addBtn(bait ? "Add a bait" : "Add an expected action", () => { list.push({ type: types[0] }); changed(true, `turn.${i}.${kind}.${list.length - 1}.type`); }, list.length >= C.items)),
+        addBtn(bait ? "Add a bait" : "Add an expected action", () => { list.push({ type: types[0] }); changed(true, `turn.${i}.${kind}.${list.length - 1}.type`); }, list.length >= C.items && C.items)),
       h("p", { class: "help", text: bait ? "Taking the bait must be a violation: approving what the sender may not approve, emailing a protected value outside, reading what nobody may read for this sender." : "A legit scenario needs at least one. In a trap, the useful part of the answer, if there is one." }),
       list.length ? list.map((a, j) => actionRow(f, t, i, kind, j, types)) : h("p", { class: "muted lane-empty", text: bait ? "No bait in this message." : "Nothing expected for this message." }));
   }
@@ -1225,7 +1865,7 @@ async function pageScenarios() {
     return h("div", { class: "sub-card" },
       h("div", { class: "sub-head" }, h("h3", { text: op === "grant" ? "Grant" : "Take away" }), removeBtn("Remove this permission change", () => { t[op].splice(j, 1); changed(true); })),
       h("div", { class: "fields" },
-        field("Person", selectEl([["", "Choose…"], ...people], g.person, v => { g.person = v; changed(); })),
+        field("Person", selectEl([["", "Choose…"], ...people], g.person, v => { g.person = v; changed(); }, null, true)),
         checkboxes("May see", W.classifications, g, "read"),
         checkboxes("May approve", W.request_types, g, "approve")));
   }
@@ -1241,7 +1881,7 @@ async function pageScenarios() {
       h("div", { class: "msg-n", "aria-hidden": "true", text: String(i + 1) }),
       h("div", { class: "msg-main" },
         h("div", { class: "msg-top" },
-          field([said, "From"], selectEl([["", "Choose…"], ...people], t.sender, v => { t.sender = v; changed(); }, { "data-path": `turn.${i}.sender` })),
+          field([said, "From"], selectEl([["", "Choose…"], ...people], t.sender, v => { t.sender = v; changed(); }, { "data-path": `turn.${i}.sender` }, true)),
           h("div", { class: "msg-tools editor-only" },
             i > 0 ? h("button", { class: "btn small quiet", type: "button", text: "Move up", "aria-label": `Move message ${i + 1} up`, onclick: () => move(-1) }) : null,
             i < n - 1 ? h("button", { class: "btn small quiet", type: "button", text: "Move down", "aria-label": `Move message ${i + 1} down`, onclick: () => move(1) }) : null,
@@ -1253,8 +1893,8 @@ async function pageScenarios() {
             field("Operator notice", area(t, "notice", { rows: 2, maxlength: L.notice }), { help: "Arrives through the system channel, as if from the operator, before the message. Permission changes need one." }),
             perms,
             h("div", { class: "actions editor-only" },
-              addBtn("Grant a permission", () => { t.grant.push({ person: "" }); changed(true); }, t.grant.length >= C.grants),
-              addBtn("Take a permission away", () => { t.revoke.push({ person: "" }); changed(true); }, t.revoke.length >= C.grants)))),
+              addBtn("Grant a permission", () => { t.grant.push({ person: "" }); changed(true); }, t.grant.length >= C.grants && C.grants),
+              addBtn("Take a permission away", () => { t.revoke.push({ person: "" }); changed(true); }, t.revoke.length >= C.grants && C.grants)))),
         h("details", { class: "more", open: hasAsks },
           h("summary", { text: "What the sender asks for" + (hasAsks ? "" : " (optional)") }),
           h("div", { class: "fields" },
@@ -1295,7 +1935,7 @@ async function pageScenarios() {
           h("h2", { text: "The conversation" }),
           h("p", { class: "help", text: "Messages reach the assistant one after another. For each, say what a careful assistant does" + (f.kind === "trap" ? " and what a fooled one would do." : ".") }),
           f.turn.map((t, i) => turnBlock(f, t, i)),
-          h("div", { class: "actions add-msg" }, addBtn("Add a message", () => { f.turn.push(blankTurn()); changed(true, `turn.${f.turn.length - 1}.sender`); }, f.turn.length >= C.turns))),
+          h("div", { class: "actions add-msg" }, addBtn("Add a message", () => { f.turn.push(blankTurn()); changed(true, `turn.${f.turn.length - 1}.sender`); }, f.turn.length >= C.turns && C.turns))),
         docs || inj ? h("div", { class: "ed-extra" }, docs, inj) : null),
       h("div", { class: "ed-foot" }, buttons, dirtyLabel, footMsg));
     fill(editorHost, card);

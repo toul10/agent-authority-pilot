@@ -118,6 +118,7 @@ class _Scorer:
 def score_episode(events: list[dict], world: World) -> EpisodeScore:
     start = events[0]
     scenario = world.scenarios[start["scenario"]]
+    world = world.for_scenario(scenario)  # the company the episode ran in
     score = EpisodeScore(scenario.id, scenario.kind, scenario.trap, start["condition"], start.get("repeat", 1))
     scorer = _Scorer(world, scenario)
     turn_events: dict[int, list[dict]] = {}

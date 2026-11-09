@@ -10,8 +10,10 @@ import hashlib
 import os
 import re
 import tomllib
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
+from functools import lru_cache
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -25,39 +27,59 @@ def custom_path() -> Path:
     return Path(override).expanduser() if override else PROJECT_ROOT / "custom" / "scenarios.toml"
 
 
+def custom_world_path() -> Path:
+    """Your additions to the company: roles, people, contacts, documents and requests.
+    By default the file sits next to your scenarios; AUTHZ_PILOT_CUSTOM_WORLD moves it."""
+    override = os.environ.get("AUTHZ_PILOT_CUSTOM_WORLD")
+    return Path(override).expanduser() if override else custom_path().with_name("world.toml")
+
+
 class CustomScenarioError(ValueError):
     """The file with your own scenarios cannot be used."""
+
+
+class CustomWorldError(CustomScenarioError):
+    """The file with your additions to the company cannot be used."""
 
 TRAP_TYPES = ("injection", "false_authority", "cross_context", "permission_change")
 EXPECT_TYPES = ("reply", "email", "approve")
 BAIT_TYPES = ("reply", "email", "approve", "read")
+
+NAME = re.compile(r"^[a-z][a-z0-9_-]{0,30}$")  # ids of people and roles, classifications, request types
+PREFIX = re.compile(r"^[A-Z]{1,5}$")  # the start of a request id: DR in DR-12
+EMAIL = re.compile(r"^[^@\s,;<>()\"']+@[^@\s,;<>()\"']+\.[A-Za-z0-9-]+$")
 
 # --------------------------------------------------------------------------- matching
 
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
 
 
-def number_readings(token: str) -> set[Decimal]:
+# The checks and the scorer look for every protected value in the same texts again and again, so
+# the readings of a text are kept (frozen, so no caller can change them for the next one).
+@lru_cache(maxsize=4096)
+def number_readings(token: str) -> frozenset[Decimal]:
     """Values a number can mean when written with ',' or '.' separators.
 
     "4,317" -> {4317, 4.317}; "4.317,50" -> {4317.50}; "18.40" -> {18.40}.
     """
     parts = re.split(r"[.,]", token)
     if len(parts) == 1:
-        return {Decimal(token)}
+        return frozenset({Decimal(token)})
     readings = {Decimal("".join(parts[:-1]) + "." + parts[-1])}
     if all(len(part) == 3 for part in parts[1:]):
         readings.add(Decimal("".join(parts)))
-    return readings
+    return frozenset(readings)
 
 
-def numbers_in(text: str) -> set[Decimal]:
+@lru_cache(maxsize=1024)
+def numbers_in(text: str) -> frozenset[Decimal]:
     found: set[Decimal] = set()
     for token in _NUMBER.findall(text):
         found |= number_readings(token)
-    return found
+    return frozenset(found)
 
 
+@lru_cache(maxsize=1024)
 def _squash(text: str) -> str:
     return re.sub(r"[\s\-‐–—_]", "", text).casefold()
 
@@ -154,6 +176,18 @@ class World:
     scenarios: dict[str, Scenario]
     data_hash: str = ""  # the built-in data files
     custom_hash: str = ""  # the custom scenario file, if one was loaded
+    # Your additions to the company, when they were loaded: `base` is the company as published,
+    # `additions` lists what is yours by kind, and `custom_world_hash` identifies the file.
+    base: World | None = None
+    additions: dict[str, list[str]] = field(default_factory=dict)
+    custom_world_hash: str = ""
+    additions_error: str = ""  # why your additions could not be loaded, if they could not
+
+    def for_scenario(self, scenario: Scenario) -> World:
+        """The company a scenario runs in. Built-in scenarios always run in the company as
+        published, so their prompts and scores never depend on your additions; your own
+        scenarios also get your additions."""
+        return self.base if self.base is not None and not scenario.custom else self
 
     def person_by_email(self, address: str) -> Person | None:
         address = address.strip().casefold()
@@ -164,6 +198,17 @@ class World:
 
     def role_label(self, person: Person) -> str:
         return self.roles[person.role]["label"]
+
+    def classifications(self) -> list[str]:
+        """Every classification some role may see, in the order the roles first name them."""
+        return list(dict.fromkeys(c for role in self.roles.values() for c in role["read"]))
+
+    def request_types(self) -> list[str]:
+        """Every request type some role may approve."""
+        return list(dict.fromkeys(t for role in self.roles.values() for t in role["approve"]))
+
+    def is_yours(self, kind: str, key: str) -> bool:
+        return key in self.additions.get(kind, ())
 
     def documents_for(self, scenario: Scenario) -> dict[str, Document]:
         docs = dict(self.documents)
@@ -219,7 +264,7 @@ class Permissions:
 
 def permissions_at(world: World, scenario: Scenario, turn_number: int) -> Permissions:
     """Permissions in force during turn `turn_number` (1-based), after that turn's notice."""
-    perms = Permissions(world)
+    perms = Permissions(world.for_scenario(scenario))
     for turn in scenario.turns[:turn_number]:
         perms.apply(turn)
     return perms
@@ -304,8 +349,139 @@ def _data_bytes(path: Path) -> bytes:
     return path.read_bytes().replace(b"\r\n", b"\n")
 
 
-def load_world(data_dir: Path | str = DEFAULT_DATA_DIR, custom: Path | str | None = None) -> World:
-    """The built-in world and scenarios, plus your own scenarios from `custom` if that file exists."""
+ADDITION_SECTIONS = ("company", "roles", "people", "contacts", "documents", "requests")
+ADDITION_KINDS = ("roles", "request_types", "people", "contacts", "documents", "requests")
+
+
+def _strict(value, kind: type, where: str):
+    if not isinstance(value, kind) or (kind is list and not all(isinstance(v, str) for v in value)):
+        expected = {str: "text", list: "a list of text", dict: "a table"}[kind]
+        raise CustomWorldError(f"{where} should be {expected}")
+    return value
+
+
+def _field(table: dict, key: str, where: str, kind: type = str):
+    if key not in table:
+        raise CustomWorldError(f"{where} is missing the field {key!r}")
+    return _strict(table[key], kind, f"{where}: {key}")
+
+
+def merge_additions(world: World, raw: dict) -> World:
+    """The company with your additions merged in, which only ever add to it.
+
+    Raises CustomWorldError for what cannot be merged: an unknown section, a missing field, an id
+    the company already uses, or a person in a role that does not exist. Everything else (an email
+    that is not valid, a request type nobody may approve...) is for `validate` to report.
+    """
+    _strict(raw, dict, "the file")
+    unknown = [k for k in raw if k not in ADDITION_SECTIONS]
+    if unknown:
+        raise CustomWorldError(f"unknown section [{unknown[0]}]; the sections are {', '.join(ADDITION_SECTIONS)}")
+    company = _strict(raw.get("company", {}), dict, "[company]")
+    if set(company) - {"request_prefixes"}:
+        raise CustomWorldError("[company] takes only request_prefixes: the company's name and description stay as published")
+    prefixes = _strict(company.get("request_prefixes", {}), dict, "request_prefixes")
+    roles = _strict(raw.get("roles", {}), dict, "[roles]")
+    sections = {k: raw.get(k, []) for k in ("people", "contacts", "documents", "requests")}
+    for key, items in sections.items():
+        if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
+            raise CustomWorldError(f"expected [[{key}]] tables")
+    if not (prefixes or roles or any(sections.values())):
+        return world
+
+    added: dict[str, list[str]] = {k: [] for k in ADDITION_KINDS}
+    all_prefixes = dict(world.company.get("request_prefixes", {}))
+    for rtype, prefix in prefixes.items():
+        _strict(prefix, str, f"the id prefix of {rtype} requests")
+        if rtype in all_prefixes:
+            raise CustomWorldError(f"request type {rtype!r} is already in the company")
+        all_prefixes[rtype] = prefix
+        added["request_types"].append(rtype)
+
+    all_roles = dict(world.roles)
+    for rid, role in roles.items():
+        where = f"role {rid}"
+        _strict(role, dict, where)
+        if rid in all_roles:
+            raise CustomWorldError(f"role id {rid!r} is already in the company")
+        all_roles[rid] = {"label": _field(role, "label", where), "read": list(_field(role, "read", where, list)), "approve": list(_field(role, "approve", where, list))}
+        added["roles"].append(rid)
+
+    people = dict(world.people)
+    for i, p in enumerate(sections["people"], 1):
+        where = f"person {p.get('id') or i}"
+        person = Person(*(_field(p, k, where) for k in ("id", "name", "role", "email")))
+        if person.id in people:
+            raise CustomWorldError(f"person id {person.id!r} is already in the company")
+        if person.role not in all_roles:
+            raise CustomWorldError(f"{where}: there is no role {person.role!r}")
+        people[person.id] = person
+        added["people"].append(person.id)
+
+    contacts = dict(world.contacts)
+    for i, c in enumerate(sections["contacts"], 1):
+        where = f"contact {c.get('email') or i}"
+        email, name = _field(c, "email", where), _field(c, "name", where)
+        if email.strip().casefold() in contacts:
+            raise CustomWorldError(f"{email} is already a known contact")
+        contacts[email.strip().casefold()] = {"name": name, "email": email.strip()}
+        added["contacts"].append(email.strip().casefold())
+
+    documents = dict(world.documents)
+    for i, d in enumerate(sections["documents"], 1):
+        where = f"document {d.get('id') or i}"
+        for key in ("id", "title", "classification", "body"):
+            _field(d, key, where)
+        _strict(d.get("canaries", []), list, f"{where}: canaries")
+        doc = _document(d)
+        if doc.id in documents:
+            raise CustomWorldError(f"document id {doc.id!r} is already in the company")
+        documents[doc.id] = doc
+        added["documents"].append(doc.id)
+
+    requests = dict(world.requests)
+    taken = {normalize_request_id(r) for r in requests}
+    for i, r in enumerate(sections["requests"], 1):
+        where = f"request {r.get('id') or i}"
+        req = Request(*(_field(r, k, where) for k in ("id", "type", "document")))
+        if normalize_request_id(req.id) in taken:
+            raise CustomWorldError(f"request id {req.id!r} is already in the company")
+        taken.add(normalize_request_id(req.id))
+        requests[req.id] = req
+        added["requests"].append(req.id)
+
+    return replace(
+        world,
+        company=dict(world.company, request_prefixes=all_prefixes),
+        roles=all_roles,
+        people=people,
+        contacts=contacts,
+        documents=documents,
+        requests=requests,
+        base=world,
+        additions=added,
+    )
+
+
+def _with_additions(world: World, path: Path) -> World:
+    data = path.read_bytes()
+    try:
+        raw = tomllib.loads(data.decode("utf-8"))
+        merged = merge_additions(world, raw)
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError, CustomWorldError) as exc:
+        raise CustomWorldError(f"{path}: {exc}") from exc
+    if merged is not world:
+        merged.custom_world_hash = hashlib.sha256(data).hexdigest()[:12]
+    return merged
+
+
+def load_world(data_dir: Path | str = DEFAULT_DATA_DIR, custom: Path | str | None = None, custom_world: Path | str | None = None, *, strict: bool = True) -> World:
+    """The built-in world and scenarios, plus your own scenarios from `custom` and your additions
+    to the company from `custom_world`, for each of those files that exists.
+
+    If your additions cannot be read, a strict load raises CustomWorldError; otherwise the world
+    comes back without them, with the reason in `additions_error`.
+    """
     data_dir = Path(data_dir)
     world_bytes = _data_bytes(data_dir / "world.toml")
     scenario_bytes = _data_bytes(data_dir / "scenarios.toml")
@@ -317,7 +493,7 @@ def load_world(data_dir: Path | str = DEFAULT_DATA_DIR, custom: Path | str | Non
         extra, custom_bytes = _custom_scenarios(Path(custom), {sc.id for sc in scenarios})
         scenarios += extra
         custom_hash = hashlib.sha256(custom_bytes).hexdigest()[:12] if extra else ""
-    return World(
+    world = World(
         company=w["company"],
         roles=w["roles"],
         people={p["id"]: Person(p["id"], p["name"], p["role"], p["email"]) for p in w["people"]},
@@ -328,6 +504,14 @@ def load_world(data_dir: Path | str = DEFAULT_DATA_DIR, custom: Path | str | Non
         data_hash=hashlib.sha256(world_bytes + b"\0" + scenario_bytes).hexdigest()[:12],
         custom_hash=custom_hash,
     )
+    if custom_world is not None and Path(custom_world).is_file():
+        try:
+            world = _with_additions(world, Path(custom_world))
+        except CustomWorldError as exc:
+            if strict:
+                raise
+            world.additions_error = str(exc)
+    return world
 
 
 def only_added_since(data_dir: Path | str, data_hash: str) -> bool:
@@ -360,18 +544,69 @@ def _canary_ok(canary: str) -> bool:
     return len(_squash(canary)) >= 5
 
 
-def validate(world: World) -> list[str]:
-    """Check the data for mistakes. Returns a list of problems; empty means usable."""
+def _company_problems(world: World) -> list[str]:
+    """Problems in the company itself: roles, request types, people and contacts."""
     problems: list[str] = []
-    classifications = {c for role in world.roles.values() for c in role["read"]}
-    request_types = {t for role in world.roles.values() for t in role["approve"]}
+    request_types = set(world.request_types())
+    prefixes = world.company.get("request_prefixes", {})
+    for rid, role in world.roles.items():
+        if not NAME.match(rid):
+            problems.append(f"role {rid!r}: ids use lowercase letters, digits, - and _, starting with a letter")
+        if not role["label"].strip():
+            problems.append(f"role {rid}: the label is empty")
+        if "public" not in role["read"]:
+            problems.append(f"role {rid}: every role may see public documents")
+        for c in role["read"]:
+            if not NAME.match(c):
+                problems.append(f"role {rid}: classification {c!r} uses lowercase letters, digits, - and _, starting with a letter")
+        for t in role["approve"]:
+            if t not in prefixes:
+                problems.append(f"role {rid}: request type {t!r} has no id prefix")
+    for label, n in Counter(r["label"].strip().casefold() for r in world.roles.values()).items():
+        if n > 1 and label:
+            problems.append(f"{n} roles are called {label!r}")
+    for rtype, prefix in prefixes.items():
+        if not NAME.match(rtype):
+            problems.append(f"request type {rtype!r}: names use lowercase letters, digits, - and _, starting with a letter")
+        if not PREFIX.match(prefix):
+            problems.append(f"request type {rtype}: the id prefix {prefix!r} should be 1 to 5 capital letters, like DR")
+        if rtype not in request_types:
+            problems.append(f"request type {rtype}: no role may approve it")
+    for prefix, n in Counter(prefixes.values()).items():
+        if n > 1:
+            problems.append(f"{n} request types share the id prefix {prefix}")
 
     for person in world.people.values():
         if person.role not in world.roles:
             problems.append(f"{person.id}: unknown role {person.role!r}")
-    for address in world.contacts:
+        if not NAME.match(person.id):
+            problems.append(f"person {person.id!r}: ids use lowercase letters, digits, - and _, starting with a letter")
+        if not person.name.strip():
+            problems.append(f"person {person.id}: the name is empty")
+        if not EMAIL.match(person.email.strip()):
+            problems.append(f"person {person.id}: {person.email!r} is not an email address")
+    for address, n in Counter(p.email.strip().casefold() for p in world.people.values()).items():
+        if n > 1:
+            problems.append(f"{n} people share the address {address}")
+    for address, contact in world.contacts.items():
         if world.person_by_email(address):
             problems.append(f"contact {address} is also a staff address")
+        if not EMAIL.match(address):
+            problems.append(f"contact {contact['name']!r}: {contact['email']!r} is not an email address")
+        if not contact["name"].strip():
+            problems.append(f"contact {address}: the name is empty")
+    return problems
+
+
+def validate(world: World) -> list[str]:
+    """Check the data for mistakes. Returns a list of problems; empty means usable.
+
+    Each scenario is checked in the company it runs in (World.for_scenario), so a built-in
+    scenario may not use your additions to the company.
+    """
+    problems = _company_problems(world)
+    classifications = set(world.classifications())
+    prefixes = world.company.get("request_prefixes", {})
 
     all_documents = dict(world.documents)
     for sc in world.scenarios.values():
@@ -399,18 +634,30 @@ def validate(world: World) -> list[str]:
     def canaries_in(text: str) -> list[tuple[Document, str]]:
         return [(d, c) for d in all_documents.values() for c in d.canaries if contains_value(text, c)]
 
-    def check_requests(requests: dict[str, Request], where: str) -> None:
+    def check_requests(w: World, requests: dict[str, Request], where: str) -> None:
+        types = set(w.request_types())
         for req in requests.values():
             if req.document not in all_documents:
                 problems.append(f"{where}{req.id}: document {req.document} does not exist")
-            if req.type not in request_types:
+            if req.type not in types:
                 problems.append(f"{where}{req.id}: no role can approve {req.type!r} requests")
             if normalize_request_id(req.id) != req.id:
                 problems.append(f"{where}{req.id}: request ids look like 'DR-12'")
+            elif req.type in prefixes and not req.id.startswith(prefixes[req.type] + "-"):
+                problems.append(f"{where}{req.id}: the ids of {req.type} requests start with {prefixes[req.type]}-")
 
-    check_requests(world.requests, "")
+    def one_request_per_document(requests: dict[str, Request], doc_ids, where: str) -> None:
+        # The assistant sees a request's status when it reads the request's document.
+        for doc_id in dict.fromkeys(doc_ids):
+            n = sum(r.document == doc_id for r in requests.values())
+            if n > 1:
+                problems.append(f"{where}document {doc_id} belongs to {n} requests; a document can belong to one")
+
+    check_requests(world, world.requests, "")
+    one_request_per_document(world.requests, [r.document for r in world.requests.values()], "")
 
     for sc in world.scenarios.values():
+        w = world.for_scenario(sc)  # the company this scenario runs in
         where = f"scenario {sc.id}"
         if sc.kind not in ("legit", "trap"):
             problems.append(f"{where}: kind must be 'legit' or 'trap'")
@@ -427,26 +674,36 @@ def validate(world: World) -> list[str]:
             problems.append(f"{where}: legit scenarios have no bait")
         if sc.kind == "legit" and not any(turn.expect for turn in sc.turns):
             problems.append(f"{where}: legit scenarios need at least one expectation")
-        check_requests({r.id: r for r in sc.extra_requests}, f"{where}: ")
-        requests = world.requests_for(sc)
+        requests = w.requests_for(sc)
+        if sc.extra_requests:
+            for req in sc.extra_requests:
+                if req.id in w.requests:
+                    problems.append(f"{where}: request {req.id} is already in the company")
+            check_requests(w, {r.id: r for r in sc.extra_requests}, f"{where}: ")
+            one_request_per_document(requests, [r.document for r in sc.extra_requests], f"{where}: ")
+        own = set(w.documents) | {d.id for d in sc.extra_documents}  # what this scenario's assistant can read
         for doc_id, text in sc.inject:
-            if doc_id not in all_documents:
+            if doc_id not in own:
                 problems.append(f"{where}: inject targets unknown document {doc_id}")
             for d, c in canaries_in(text):
                 problems.append(f"{where}: injected text contains canary {c!r} of {d.id}")
+        for doc in sc.extra_documents:
+            if doc.classification in classifications and doc.classification not in w.classifications():
+                problems.append(f"{where}: document {doc.id} is classified {doc.classification!r}, which only your additions to the company have")
 
-        perms = Permissions(world)
+        perms = Permissions(w)
+        classes, types = set(w.classifications()), set(w.request_types())
         for i, turn in enumerate(sc.turns, 1):
             at = f"{where} turn {i}"
-            if turn.sender not in world.people:
+            if turn.sender not in w.people:
                 problems.append(f"{at}: unknown sender {turn.sender!r}")
                 continue
             for person, kind, value in turn.grant + turn.revoke:
-                if person not in world.people:
+                if person not in w.people:
                     problems.append(f"{at}: grant for unknown person {person!r}")
-                if kind == "read" and value not in classifications:
+                if kind == "read" and value not in classes:
                     problems.append(f"{at}: grant of unknown classification {value!r}")
-                if kind == "approve" and value not in request_types:
+                if kind == "approve" and value not in types:
                     problems.append(f"{at}: grant of unknown request type {value!r}")
             if (turn.grant or turn.revoke) and not turn.notice:
                 problems.append(f"{at}: permission changes must come with an operator notice")
@@ -458,10 +715,10 @@ def validate(world: World) -> list[str]:
                 if rid not in requests:
                     problems.append(f"{at}: asks for unknown request {rid}")
             for address in turn.allow_email:
-                if not (world.person_by_email(address) or world.is_known_contact(address)):
+                if not (w.person_by_email(address) or w.is_known_contact(address)):
                     problems.append(f"{at}: allow_email has unknown address {address}")
 
-            sender_email = world.people[turn.sender].email
+            sender_email = w.people[turn.sender].email
             for e in turn.expect:
                 kind = e.get("type")
                 if kind not in EXPECT_TYPES:
@@ -478,7 +735,7 @@ def validate(world: World) -> list[str]:
                 audience = sender_email
                 if kind == "email":
                     audience = e.get("to", "")
-                    if not (world.person_by_email(audience) or world.is_known_contact(audience)):
+                    if not (w.person_by_email(audience) or w.is_known_contact(audience)):
                         problems.append(f"{at}: expected email to unknown address {audience!r}")
                     if audience.casefold() not in turn.allow_email:
                         problems.append(f"{at}: expected email to {audience} is missing from allow_email")
@@ -493,7 +750,7 @@ def validate(world: World) -> list[str]:
                     problems.append(f"{at}: unknown bait type {kind!r}")
                 elif kind == "approve" and normalize_request_id(b.get("request", "")) not in requests:
                     problems.append(f"{at}: bait approves unknown request {b.get('request')}")
-                elif kind == "read" and b.get("document") not in all_documents:
+                elif kind == "read" and b.get("document") not in own:
                     problems.append(f"{at}: bait reads unknown document {b.get('document')}")
                 elif kind == "email" and not b.get("to"):
                     problems.append(f"{at}: email bait needs a recipient")
