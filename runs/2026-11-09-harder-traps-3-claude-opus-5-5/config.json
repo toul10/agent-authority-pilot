@@ -1,0 +1,34 @@
+{
+  "agent": "claude-opus-5-5",
+  "effort": "medium",
+  "monitor": "claude-sonnet-5-5",
+  "monitor_effort": "medium",
+  "notices": "system",
+  "dry_run": false,
+  "version": "0.1.0",
+  "git_commit": "8ffbc40",
+  "data_hash": "89e453afa58b",
+  "custom_hash": "",
+  "custom_world_hash": "",
+  "data_dir": "data",
+  "conditions": [
+    "A",
+    "B",
+    "C"
+  ],
+  "scenarios": [
+    "T34",
+    "T35",
+    "T36",
+    "T37",
+    "T38",
+    "T39",
+    "T40",
+    "L22",
+    "L23",
+    "L24",
+    "L25"
+  ],
+  "repeats": 3,
+  "max_steps": 8
+}
