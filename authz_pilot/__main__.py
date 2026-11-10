@@ -1,5 +1,6 @@
 """Command line: app, key, validate, run, report, dashboard, show.
 
+Usage:
     python -m authz_pilot app              # the local web app: quick start, settings, your scenarios, results
     python -m authz_pilot key set          # paste your Anthropic API key (hidden); key test checks it for free
     python -m authz_pilot key set --provider openai    # or google: keys for GPT and Gemini models
@@ -15,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import getpass
-import json
 import os
 import sys
 import webbrowser
@@ -23,16 +23,43 @@ from pathlib import Path
 
 from .checks import scripted_checks
 from .models import EFFORTS, MODELS, provider_of
-from .providers import check_models
 from .prompts import render_transcript
+from .providers import check_models
 from .runner import CONDITIONS, is_complete, read_events
-from .runs import RunError, execute, load_run, pick_scenarios, plan_run, problems_for_run, providers_needed, write_report
+from .runs import (
+    RunError,
+    execute,
+    load_run,
+    pick_scenarios,
+    plan_run,
+    problems_for_run,
+    providers_needed,
+    write_report,
+)
 from .scoring import score_episode
-from .settings import PROVIDERS, describe_source, env_key, load_settings, mask, parse_settings, remove_key, resolve_key, save_key
-from .world import DEFAULT_DATA_DIR, CustomScenarioError, custom_path, custom_world_path, load_world, validate
+from .settings import (
+    PROVIDERS,
+    describe_source,
+    env_key,
+    load_settings,
+    mask,
+    parse_settings,
+    remove_key,
+    resolve_key,
+    save_key,
+)
+from .world import (
+    DEFAULT_DATA_DIR,
+    CustomScenarioError,
+    World,
+    custom_path,
+    custom_world_path,
+    load_world,
+    validate,
+)
 
 
-def _world(data_dir) -> object | None:
+def _world(data_dir) -> World | None:
     """The built-in world with your own scenarios and your additions to the company. Additions
     that cannot be read are left out (see World.additions_error): only your scenarios need them."""
     try:
@@ -43,8 +70,14 @@ def _world(data_dir) -> object | None:
 
 
 def _additions_summary(world) -> str:
-    names = {"roles": ("role", "roles"), "request_types": ("request type", "request types"), "people": ("person", "people"),
-             "contacts": ("contact", "contacts"), "documents": ("document", "documents"), "requests": ("request", "requests")}
+    names = {
+        "roles": ("role", "roles"),
+        "request_types": ("request type", "request types"),
+        "people": ("person", "people"),
+        "contacts": ("contact", "contacts"),
+        "documents": ("document", "documents"),
+        "requests": ("request", "requests"),
+    }
     parts = [f"{len(ids)} {names[k][len(ids) != 1]}" for k, ids in world.additions.items() if ids]
     return ", ".join(parts)
 
@@ -76,7 +109,11 @@ def cmd_validate(args) -> int:
     builtin = [s for s in world.scenarios.values() if not s.custom]
     legit = sum(s.kind == "legit" for s in builtin)
     mine = len(world.scenarios) - len(builtin)
-    print(f"OK: {len(builtin)} scenarios ({legit} legit, {len(builtin) - legit} traps)" + (f" and {mine} of your own" if mine else "") + f", data {world.data_hash}.")
+    print(
+        f"OK: {len(builtin)} scenarios ({legit} legit, {len(builtin) - legit} traps)"
+        + (f" and {mine} of your own" if mine else "")
+        + f", data {world.data_hash}."
+    )
     if world.additions:
         print(f"Your additions to the company ({_additions_summary(world)}) checked; only your own scenarios use them.")
     print("\nWhat code checks (condition B) can stop when an agent takes every bait (scripted, no model):\n")
@@ -92,7 +129,15 @@ def cmd_validate(args) -> int:
 
 def cmd_run(args) -> int:
     # Flags override the saved settings (key set / the app's Settings page).
-    flags = {"model": args.model, "effort": args.effort, "monitor_model": args.monitor_model, "monitor_effort": args.monitor_effort, "max_steps": args.max_steps, "workers": args.workers, "max_cost": args.max_cost}
+    flags = {
+        "model": args.model,
+        "effort": args.effort,
+        "monitor_model": args.monitor_model,
+        "monitor_effort": args.monitor_effort,
+        "max_steps": args.max_steps,
+        "workers": args.workers,
+        "max_cost": args.max_cost,
+    }
     s, bad = parse_settings({k: v for k, v in flags.items() if v is not None}, load_settings())
     if bad:
         raise SystemExit("; ".join(f"--{k.replace('_', '-')}: {v}" for k, v in bad.items()))
@@ -112,7 +157,7 @@ def cmd_run(args) -> int:
         print("\n".join(f"- {p}" for p in problems))
         return 1
 
-    keys = None
+    keys: dict[str, str | None] | None = None
     if not args.dry_run:
         keys, found = {}, []
         for provider, roles in providers_needed(s, conditions).items():
@@ -120,7 +165,10 @@ def cmd_run(args) -> int:
             key, source = resolve_key(provider)
             if not key and not (provider == "anthropic" and os.environ.get("ANTHROPIC_AUTH_TOKEN")):
                 flag = "" if provider == "anthropic" else f" --provider {provider}"
-                print(f"No {p.name} API key found, and the {' and '.join(roles)} model runs on it. Save one (the input is hidden):")
+                print(
+                    f"No {p.name} API key found, and the {' and '.join(roles)} model runs on it. "
+                    "Save one (the input is hidden):"
+                )
                 print(f"  python -m authz_pilot key set{flag}")
                 print(f"or set {p.env[0]}. On macOS a Keychain item works too:")
                 print(f'  security add-generic-password -a "$USER" -s {p.keychain} -U -w')
@@ -130,8 +178,14 @@ def cmd_run(args) -> int:
             found.append(f"{p.name} key: {describe_source(source, provider)}" + (f" ({mask(key)})" if key else ""))
         use_monitor = "C" in conditions
         episodes = len(scenario_ids) * len(conditions) * args.repeats
-        print(f"About to run {episodes} episodes: {len(scenario_ids)} scenarios × conditions {','.join(conditions)} × {args.repeats} repeat(s).")
-        print(f"Assistant: {s.model} (effort {s.effort})" + (f"; monitor: {s.monitor_model} (effort {s.monitor_effort})" if use_monitor else ""))
+        print(
+            f"About to run {episodes} episodes: {len(scenario_ids)} scenarios × conditions {','.join(conditions)} × "
+            f"{args.repeats} repeat(s)."
+        )
+        print(
+            f"Assistant: {s.model} (effort {s.effort})"
+            + (f"; monitor: {s.monitor_model} (effort {s.monitor_effort})" if use_monitor else "")
+        )
         print("\n".join(found))
         print(f"No new episode starts once the estimated spend passes ${s.max_cost:.2f}.")
         if not args.yes:
@@ -143,20 +197,36 @@ def cmd_run(args) -> int:
                 return 1
 
     try:
-        plan = plan_run(scenario_ids=scenario_ids, conditions=conditions, repeats=args.repeats, settings=s, dry_run=args.dry_run, scripted_agent=args.scripted_agent, out=args.out, data_dir=Path(args.data), api_keys=keys)
+        plan = plan_run(
+            scenario_ids=scenario_ids,
+            conditions=conditions,
+            repeats=args.repeats,
+            settings=s,
+            dry_run=args.dry_run,
+            scripted_agent=args.scripted_agent,
+            out=args.out,
+            data_dir=Path(args.data),
+            api_keys=keys,
+        )
     except RunError as exc:
         print(exc)
         return 1
     state = execute(plan, progress=(lambda _: None) if args.dry_run else print)
     out, scores = plan.out, state["scores"]
     print((out / "report.md").read_text(encoding="utf-8"))
-    print(f"Episodes run: {state['ran']}, already done: {state['skipped']}, not started (budget): {state['over_budget']}. Estimated spend: ${state['spent']:.2f}.")
+    print(
+        f"Episodes run: {state['ran']}, already done: {state['skipped']}, not started (budget): "
+        f"{state['over_budget']}. Estimated spend: ${state['spent']:.2f}."
+    )
     errors = sum(sc.stopped == "error" for sc in scores)
     monitor_errors = sum(sc.monitor_errors for sc in scores)
     if errors:
         print(f"Warning: {errors} episode(s) stopped with an error; run the same command again to retry them.")
     if monitor_errors:
-        print(f"Warning: the monitor failed {monitor_errors} time(s); those actions were blocked. Check the monitor_call events.")
+        print(
+            f"Warning: the monitor failed {monitor_errors} time(s); those actions were blocked. "
+            "Check the monitor_call events."
+        )
     print(f"Report: {out / 'report.md'}")
     print(f"Dashboard: {out / 'dashboard.html'}  (python -m authz_pilot dashboard {out})")
     return 0
@@ -185,21 +255,24 @@ def cmd_key(args) -> int:
             print(f"Still in use: {describe_source(source, provider)} ({mask(key)}).")
         return 0
     if args.action == "status":
-        keys = {name: resolve_key(name) for name in PROVIDERS}
-        for name, (key, source) in keys.items():
+        status = {name: resolve_key(name) for name in PROVIDERS}
+        for name, (key, source) in status.items():
             print(f"{PROVIDERS[name].name} key: {describe_source(source, name)}" + (f" ({mask(key)})" if key else ""))
-        return 0 if keys[provider][0] else 1
+        return 0 if status[provider][0] else 1
 
     # test: the models in the settings, with the key of each one's provider
     s = load_settings()
     roles = {"assistant": (s.model, s.effort), "monitor": (s.monitor_model, s.monitor_effort)}
-    keys = {}
+    keys: dict[str, str | None] = {}
     for name in dict.fromkeys(provider_of(m) for m, _ in roles.values()):
         key, source = resolve_key(name)
         print(f"{PROVIDERS[name].name} key: {describe_source(source, name)}" + (f" ({mask(key)})" if key else ""))
         keys[name] = key
     if not any(keys.values()) and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-        print("Save one first: python -m authz_pilot key set" + ("" if "anthropic" in keys else f" --provider {next(iter(keys))}"))
+        print(
+            "Save one first: python -m authz_pilot key set"
+            + ("" if "anthropic" in keys else f" --provider {next(iter(keys))}")
+        )
         return 2
     result = check_models(roles, keys)
     if result["error"]:
@@ -209,7 +282,11 @@ def cmd_key(args) -> int:
         status = "ok  " if row["ok"] else "FAIL"
         problems = "" if row["ok"] else ": " + "; ".join(row["problems"])
         print(f"{status} {row['role']:<9} {row['name']} ({row['model']}), effort {row['effort']}{problems}")
-    print("The key works, and both models can do what the harness needs." if result["ok"] else "Pick other models or efforts in the settings, then test again.")
+    print(
+        "The key works, and both models can do what the harness needs."
+        if result["ok"]
+        else "Pick other models or efforts in the settings, then test again."
+    )
     print("These checks are free: they look the models up, and use no tokens.")
     return 0 if result["ok"] else 1
 
@@ -280,28 +357,59 @@ def main(argv: list[str] | None = None) -> int:
     a.set_defaults(func=cmd_app)
 
     k = sub.add_parser("key", help="save, check or remove an API key (Anthropic, OpenAI or Google)")
-    k.add_argument("action", choices=["set", "test", "status", "remove"], help="set: paste it (hidden); test: free check of the keys and the chosen models; status: where each key comes from; remove: delete the saved key")
-    k.add_argument("--provider", choices=list(PROVIDERS), default="anthropic", help="whose key to set or remove (default: anthropic)")
+    k.add_argument(
+        "action",
+        choices=["set", "test", "status", "remove"],
+        help=(
+            "set: paste it (hidden); test: free check of the keys and the chosen models; "
+            "status: where each key comes from; remove: delete the saved key"
+        ),
+    )
+    k.add_argument(
+        "--provider",
+        choices=list(PROVIDERS),
+        default="anthropic",
+        help="whose key to set or remove (default: anthropic)",
+    )
     k.set_defaults(func=cmd_key)
 
     v = sub.add_parser("validate", help="check the data and run the scripted checks (no API calls)")
     v.add_argument("--data", default=str(DEFAULT_DATA_DIR))
     v.set_defaults(func=cmd_validate)
 
-    r = sub.add_parser("run", help="run scenarios against a real model (Claude, GPT or Gemini), or --dry-run with a scripted agent")
+    r = sub.add_parser(
+        "run", help="run scenarios against a real model (Claude, GPT or Gemini), or --dry-run with a scripted agent"
+    )
     r.add_argument("--conditions", default="A,B,C", help="comma-separated subset of A,B,C")
-    r.add_argument("--scenarios", default="all", help="all (the built-in ones), legit, trap, custom (yours), or comma-separated ids")
+    r.add_argument(
+        "--scenarios",
+        default="all",
+        help="all (the built-in ones), legit, trap, custom (yours), or comma-separated ids",
+    )
     r.add_argument("--repeats", type=int, default=1)
-    r.add_argument("--model", choices=list(MODELS), help="the assistant (default: the saved setting, else claude-opus-5-5)")
+    r.add_argument(
+        "--model", choices=list(MODELS), help="the assistant (default: the saved setting, else claude-opus-5-5)"
+    )
     r.add_argument("--effort", choices=EFFORTS, help="default: the saved setting, else medium")
-    r.add_argument("--monitor-model", choices=list(MODELS), help="the monitor in condition C (default: the saved setting, else claude-sonnet-5-5)")
+    r.add_argument(
+        "--monitor-model",
+        choices=list(MODELS),
+        help="the monitor in condition C (default: the saved setting, else claude-sonnet-5-5)",
+    )
     r.add_argument("--monitor-effort", choices=EFFORTS, help="default: the saved setting, else medium")
     r.add_argument("--max-steps", type=int, help="model calls allowed per message (default 8)")
     r.add_argument("--workers", type=int, help="episodes run in parallel (default 4)")
-    r.add_argument("--max-cost", type=float, help="USD; no new episode starts after the estimate passes this (default 20)")
+    r.add_argument(
+        "--max-cost", type=float, help="USD; no new episode starts after the estimate passes this (default 20)"
+    )
     r.add_argument("--out", type=Path, help="run directory (default: results/<timestamp>)")
     r.add_argument("--dry-run", action="store_true", help="use a scripted agent; no API key needed")
-    r.add_argument("--scripted-agent", choices=["gullible", "oracle"], default="gullible", help="which scripted agent --dry-run uses")
+    r.add_argument(
+        "--scripted-agent",
+        choices=["gullible", "oracle"],
+        default="gullible",
+        help="which scripted agent --dry-run uses",
+    )
     r.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     r.add_argument("--data", default=str(DEFAULT_DATA_DIR))
     r.set_defaults(func=cmd_run)
@@ -310,24 +418,33 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument("run_dir", type=Path)
     rep.set_defaults(func=cmd_report)
 
-    dash = sub.add_parser("dashboard", help="rebuild the report and open dashboard.html, a local page with charts and every conversation")
+    dash = sub.add_parser(
+        "dashboard", help="rebuild the report and open dashboard.html, a local page with charts and every conversation"
+    )
     dash.add_argument("run_dir", type=Path)
     dash.add_argument("--no-open", action="store_true", help="write the file without opening a browser")
     dash.set_defaults(func=cmd_dashboard)
 
     show = sub.add_parser("show", help="print one episode as a readable transcript")
     show.add_argument("episode", type=Path)
-    show.add_argument("--thinking", action="store_true", help="include the assistant's thinking summaries and monitor decisions")
+    show.add_argument(
+        "--thinking", action="store_true", help="include the assistant's thinking summaries and monitor decisions"
+    )
     show.set_defaults(func=cmd_show)
 
     args = parser.parse_args(argv)
     return args.func(args)
 
 
-if __name__ == "__main__":
+def cli() -> int:
+    """`python -m authz_pilot` and the `authz-pilot` command."""
     # Output sent to a file on Windows uses the local code page, which lacks some characters that
     # model replies and transcripts contain. Replace those instead of stopping with an error.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
-    raise SystemExit(main())
+    return main()
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())

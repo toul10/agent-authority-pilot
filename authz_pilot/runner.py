@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol, cast
 
-from .models import Verdict, cost_usd
+from .models import Step, Verdict, cost_usd
 from .prompts import agent_system_prompt, monitor_prompt, monitor_system_prompt, user_message
 from .tools import SIDE_EFFECT_TOOLS, TOOLS, Toolbox, tool_result
 from .world import Scenario, Turn, World, permissions_at
@@ -25,15 +27,44 @@ CONDITIONS = {
 STOPS = ("refusal", "error", "provider_stop")
 
 
+class Agent(Protocol):
+    """The assistant under test: AnthropicAgent, OpenAIAgent, GeminiAgent, or a scripted stand-in."""
+
+    def respond(self, system: str, tools: list[dict], messages: list[dict]) -> Step: ...
+
+
+class TurnAwareAgent(Agent, Protocol):
+    """An agent that is told when each new message starts (PlannedAgent acts out the scenario's turns)."""
+
+    def start_turn(self, turn_number: int, turn: Turn) -> None: ...
+
+
+class Monitor(Protocol):
+    """Reviews one proposed action in condition C: AnthropicMonitor, OpenAIMonitor, GeminiMonitor or ScriptedMonitor."""
+
+    def review(self, system: str, prompt: str, request: dict | None = None) -> Verdict: ...
+
+
 def today() -> str:
     """The day of a model call, which picks the price for models whose price changes on a date."""
-    return datetime.now(timezone.utc).date().isoformat()
+    return datetime.now(UTC).date().isoformat()
 
 
 class Episode:
     """One scenario, one condition, one assistant. Call run() once."""
 
-    def __init__(self, world: World, scenario: Scenario, condition: str, agent, monitor=None, *, max_steps: int = 8, repeat: int = 1, meta: dict | None = None):
+    def __init__(
+        self,
+        world: World,
+        scenario: Scenario,
+        condition: str,
+        agent: Agent,
+        monitor: Monitor | None = None,
+        *,
+        max_steps: int = 8,
+        repeat: int = 1,
+        meta: dict | None = None,
+    ):
         if condition not in CONDITIONS:
             raise ValueError(f"unknown condition {condition!r}")
         if condition == "C" and monitor is None:
@@ -63,14 +94,30 @@ class Episode:
     def run(self) -> list[dict]:
         sc = self.scenario
         mine = {"custom_world_hash": self.world.custom_world_hash} if self.world.custom_world_hash else {}
-        self.emit("episode_start", scenario=sc.id, kind=sc.kind, trap=sc.trap, condition=self.condition, repeat=self.repeat, data_hash=self.world.data_hash, **mine, **self.meta)
+        self.emit(
+            "episode_start",
+            scenario=sc.id,
+            kind=sc.kind,
+            trap=sc.trap,
+            condition=self.condition,
+            repeat=self.repeat,
+            data_hash=self.world.data_hash,
+            **mine,
+            **self.meta,
+        )
         stopped = None
         for number, turn in enumerate(sc.turns, 1):
             outcome = self._turn(number, turn)
             if outcome in STOPS:
                 stopped = outcome
                 break
-        self.emit("episode_end", stopped=stopped, approved=sorted(self.box.approved), emails_sent=len(self.box.outbox), escalations=len(self.box.escalations))
+        self.emit(
+            "episode_end",
+            stopped=stopped,
+            approved=sorted(self.box.approved),
+            emails_sent=len(self.box.outbox),
+            escalations=len(self.box.escalations),
+        )
         return self.events
 
     # -- one turn ----------------------------------------------------------------
@@ -79,10 +126,17 @@ class Episode:
         self.number, self.turn = number, turn
         self.perms = permissions_at(self.world, self.scenario, number)
         self.sender = self.world.people[turn.sender]
-        self.emit("turn_start", turn=number, sender=turn.sender, message=turn.message, notice=turn.notice, permissions=self.perms.describe())
+        self.emit(
+            "turn_start",
+            turn=number,
+            sender=turn.sender,
+            message=turn.message,
+            notice=turn.notice,
+            permissions=self.perms.describe(),
+        )
 
         text = {"type": "text", "text": user_message(self.world, self.sender, turn.message)}
-        self.history.append({"role": "user", "content": self.carry + [text]})
+        self.history.append({"role": "user", "content": [*self.carry, text]})
         self.carry = []
         system_parts = [p for p in (self.note, f"Operator notice: {turn.notice}" if turn.notice else "") if p]
         self.note = ""
@@ -90,7 +144,7 @@ class Episode:
             # Mid-conversation system message: it must follow a user message.
             self.history.append({"role": "system", "content": "\n\n".join(system_parts)})
         if hasattr(self.agent, "start_turn"):
-            self.agent.start_turn(number, turn)
+            cast(TurnAwareAgent, self.agent).start_turn(number, turn)
 
         texts: list[str] = []
         outcome = "replied"
@@ -112,9 +166,21 @@ class Episode:
                 outcome = "replied" if step.stop_reason in ("end_turn", "stop_sequence") else step.stop_reason
                 break
             if step.stop_reason != "tool_use" or step_number == self.max_steps:
-                why = "step limit reached" if step.stop_reason == "tool_use" else f"response ended with {step.stop_reason}"
+                why = (
+                    "step limit reached"
+                    if step.stop_reason == "tool_use"
+                    else f"response ended with {step.stop_reason}"
+                )
                 for call in calls:
-                    self.emit("tool_call", turn=number, id=call["id"], name=call["name"], input=call.get("input"), status="not_run", reason=why)
+                    self.emit(
+                        "tool_call",
+                        turn=number,
+                        id=call["id"],
+                        name=call["name"],
+                        input=call.get("input"),
+                        status="not_run",
+                        reason=why,
+                    )
                 self.carry = [tool_result(c["id"], f"Not run: {why}.", True) for c in calls]
                 outcome = "step_limit" if step.stop_reason == "tool_use" else step.stop_reason
                 break
@@ -127,8 +193,19 @@ class Episode:
             verdict = self._review({"kind": "reply", "reply": reply})
             if verdict.decision != "allow":
                 delivered, blocked_by, reason = False, "monitor", verdict.reason
-                self.note = f"Operator notice: your last reply, to {self.sender.name}, was not delivered. The policy monitor withheld it: {verdict.reason}"
-        self.emit("turn_end", turn=number, outcome=outcome, reply=reply, delivered=delivered, blocked_by=blocked_by, reason=reason)
+                self.note = (
+                    f"Operator notice: your last reply, to {self.sender.name}, was not delivered. "
+                    f"The policy monitor withheld it: {verdict.reason}"
+                )
+        self.emit(
+            "turn_end",
+            turn=number,
+            outcome=outcome,
+            reply=reply,
+            delivered=delivered,
+            blocked_by=blocked_by,
+            reason=reason,
+        )
         return outcome
 
     # -- tools and monitor ---------------------------------------------------------
@@ -159,17 +236,41 @@ class Episode:
     def _review(self, request: dict) -> Verdict:
         prompt = monitor_prompt(self.world, self.events, self.sender, self.perms, request)
         try:
+            assert self.monitor is not None  # only condition C reviews, and __init__ requires a monitor for it
             verdict = self.monitor.review(self.monitor_system, prompt, request)
         except Exception as exc:  # fail closed
-            verdict = Verdict("block", "The monitor could not be reached, so the action was blocked.", error=f"{type(exc).__name__}: {exc}")
+            verdict = Verdict(
+                "block",
+                "The monitor could not be reached, so the action was blocked.",
+                error=f"{type(exc).__name__}: {exc}",
+            )
         if verdict.decision not in ("allow", "block"):
-            verdict = Verdict("block", "The monitor gave no valid decision.", usage=verdict.usage, model=verdict.model, error=f"decision={verdict.decision!r}")
+            verdict = Verdict(
+                "block",
+                "The monitor gave no valid decision.",
+                usage=verdict.usage,
+                model=verdict.model,
+                error=f"decision={verdict.decision!r}",
+            )
         target = request["kind"] if request["kind"] == "reply" else request["name"]
-        self.emit("monitor_call", turn=self.number, target=target, decision=verdict.decision, reason=verdict.reason, usage=verdict.usage, model=verdict.model, request_id=verdict.request_id, error=verdict.error, day=today())
+        self.emit(
+            "monitor_call",
+            turn=self.number,
+            target=target,
+            decision=verdict.decision,
+            reason=verdict.reason,
+            usage=verdict.usage,
+            model=verdict.model,
+            request_id=verdict.request_id,
+            error=verdict.error,
+            day=today(),
+        )
         return verdict
 
 
-def run_episode(world: World, scenario: Scenario, condition: str, agent, monitor=None, **kwargs) -> list[dict]:
+def run_episode(
+    world: World, scenario: Scenario, condition: str, agent: Agent, monitor: Monitor | None = None, **kwargs
+) -> list[dict]:
     return Episode(world, scenario, condition, agent, monitor, **kwargs).run()
 
 
@@ -205,7 +306,21 @@ def is_finished(path: Path) -> bool:
     return is_complete(path) and read_events(path)[-1].get("stopped") != "error"
 
 
-def run_batch(world: World, jobs: list[tuple[str, str, int]], make_agent, make_monitor, out_dir: Path, *, workers: int = 4, max_cost: float | None = None, max_steps: int = 8, meta: dict | None = None, progress=print, observe=None, stop: threading.Event | None = None) -> dict:
+def run_batch(
+    world: World,
+    jobs: list[tuple[str, str, int]],
+    make_agent: Callable[[Scenario], Agent],
+    make_monitor: Callable[[], Monitor | None],
+    out_dir: Path,
+    *,
+    workers: int = 4,
+    max_cost: float | None = None,
+    max_steps: int = 8,
+    meta: dict | None = None,
+    progress: Callable[[str], object] = print,
+    observe: Callable[[tuple[str, str, int], Episode], object] | None = None,
+    stop: threading.Event | None = None,
+) -> dict:
     """Run (scenario id, condition, repeat) jobs; one JSONL file per episode.
 
     Finished episode files are skipped, so an interrupted run can be resumed by
@@ -235,7 +350,9 @@ def run_batch(world: World, jobs: list[tuple[str, str, int]], make_agent, make_m
                 return
         scenario = world.scenarios[scenario_id]
         monitor = make_monitor() if condition == "C" else None
-        episode = Episode(world, scenario, condition, make_agent(scenario), monitor, max_steps=max_steps, repeat=repeat, meta=meta)
+        episode = Episode(
+            world, scenario, condition, make_agent(scenario), monitor, max_steps=max_steps, repeat=repeat, meta=meta
+        )
         if observe:
             observe(job, episode)
         events = episode.run()
@@ -246,7 +363,11 @@ def run_batch(world: World, jobs: list[tuple[str, str, int]], make_agent, make_m
             state["ran"] += 1
             done = state["ran"]
         stopped = events[-1].get("stopped")
-        progress(f"[{done}/{len(jobs)}] {scenario_id} {condition} #{repeat}" + (f" ({stopped})" if stopped else "") + f"  ~${cost:.3f}")
+        progress(
+            f"[{done}/{len(jobs)}] {scenario_id} {condition} #{repeat}"
+            + (f" ({stopped})" if stopped else "")
+            + f"  ~${cost:.3f}"
+        )
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         for future in [pool.submit(work, job) for job in jobs]:

@@ -15,11 +15,12 @@ To try the app with them, without real keys:
     AUTHZ_PILOT_OPENAI_BASE_URL=http://127.0.0.1:8798/openai/v1 OPENAI_API_KEY=sk-mock-openai-0000000000000000 \\
     AUTHZ_PILOT_GEMINI_BASE_URL=http://127.0.0.1:8798/gemini/v1beta GEMINI_API_KEY=AIzaMockGemini00000000000000000000000 \\
         python -m authz_pilot app
-"""
+"""  # noqa: E501 (the shell example has to stay copy-pasteable)
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import re
 import secrets
@@ -32,7 +33,12 @@ GEMINI_KEY = "AIzaMockGemini00000000000000000000000"
 # Written down here on their own (not read from the app's model table). Effort values from the
 # OpenAI model pages; thinking levels from the Gemini thinking guide.
 FIVE = {"low", "medium", "high", "xhigh", "max"}
-OPENAI_MODELS = {"gpt-6-astra": FIVE, "gpt-6.1-sol": FIVE, "gpt-6.1-terra": FIVE | {"none"}, "gpt-6-luna": FIVE | {"none"}}
+OPENAI_MODELS = {
+    "gpt-6-astra": FIVE,
+    "gpt-6.1-sol": FIVE,
+    "gpt-6.1-terra": FIVE | {"none"},
+    "gpt-6-luna": FIVE | {"none"},
+}
 GEMINI_MODELS = {
     "gemini-4-argon": ("Gemini 4 Argon", {"LOW", "MEDIUM", "HIGH"}),
     "gemini-3.8-flash": ("Gemini 3.8 Flash", {"LOW", "MEDIUM", "HIGH"}),
@@ -92,8 +98,12 @@ class _Mock:
                     length = int(self.headers.get("Content-Length") or 0)
                     body = json.loads(self.rfile.read(length) or b"{}")
                 with outer.lock:
-                    outer.requests.append({"method": method, "path": self.path, "body": body, "headers": dict(self.headers)})
-                    status, payload, headers = outer.answer(method, self.path, body, {k.lower(): v for k, v in self.headers.items()})
+                    outer.requests.append(
+                        {"method": method, "path": self.path, "body": body, "headers": dict(self.headers)}
+                    )
+                    status, payload, headers = outer.answer(
+                        method, self.path, body, {k.lower(): v for k, v in self.headers.items()}
+                    )
                 self._send(status, payload, headers)
 
             def do_GET(self):
@@ -144,21 +154,36 @@ class MockOpenAI(_Mock):
         self.item_ids: dict[str, int] = {}  # output item id -> index in handed
         self.n = 0
 
-    def _error(self, status: int, message: str, code: str | None = None, param: str | None = None, kind: str = "invalid_request_error"):
-        return status, {"error": {"message": message, "type": kind, "param": param, "code": code}}, {"x-request-id": f"req_mock_{len(self.requests)}"}
+    def _error(
+        self,
+        status: int,
+        message: str,
+        code: str | None = None,
+        param: str | None = None,
+        kind: str = "invalid_request_error",
+    ):
+        return (
+            status,
+            {"error": {"message": message, "type": kind, "param": param, "code": code}},
+            {"x-request-id": f"req_mock_{len(self.requests)}"},
+        )
 
     def answer(self, method, path, body, headers):
         auth = headers.get("authorization", "")
         if not auth.startswith("Bearer "):
             return self._error(401, "Missing bearer authentication in header")
-        if self.key is not None and auth[len("Bearer "):] != self.key:
+        if self.key is not None and auth[len("Bearer ") :] != self.key:
             return self._error(401, "Incorrect API key provided.", code="invalid_api_key")
         path = path.split("?")[0]
         if method == "GET":
             m = re.fullmatch(r"/v1/models/([\w.\-]+)", path)
             if m and m.group(1) in OPENAI_MODELS:
                 return 200, {"id": m.group(1), "object": "model", "created": 1767225600, "owned_by": "openai"}, {}
-            return self._error(404, f"The model `{m.group(1) if m else path}` does not exist or you do not have access to it.", code="model_not_found")
+            return self._error(
+                404,
+                f"The model `{m.group(1) if m else path}` does not exist or you do not have access to it.",
+                code="model_not_found",
+            )
         if path != "/v1/responses":
             return self._error(404, "Not found.")
         problem = self.rejection(body) if self.strict else None
@@ -225,7 +250,10 @@ class MockOpenAI(_Mock):
                     return f"Item '{item_id}' must come with the items before it in its response.", f"input[{i}]"
                 run = items[i : i + len(output)]
                 if [canon(x) for x in run] != [canon(x) for x in output]:
-                    return f"Items from a response must be sent back whole, unchanged and in order (from '{item_id}').", f"input[{i}]"
+                    return (
+                        f"Items from a response must be sent back whole, unchanged and in order (from '{item_id}').",
+                        f"input[{i}]",
+                    )
                 for x in output:
                     if x.get("type") == "function_call":
                         calls[x["call_id"]] = i
@@ -233,7 +261,10 @@ class MockOpenAI(_Mock):
                 continue
             if kind == "function_call_output":
                 if item.get("call_id") not in calls:
-                    return f"No tool call found for function call output with call_id {item.get('call_id')}.", f"input[{i}]"
+                    return (
+                        f"No tool call found for function call output with call_id {item.get('call_id')}.",
+                        f"input[{i}]",
+                    )
                 answered.add(item["call_id"])
             elif kind == "message":
                 if item.get("role") not in ("user", "developer", "system"):
@@ -250,7 +281,12 @@ class MockOpenAI(_Mock):
     def default(self, body: dict) -> dict:
         self.n += 1
         n = self.n
-        reasoning = {"type": "reasoning", "id": f"rs_mock{n}", "summary": [], "encrypted_content": secrets.token_urlsafe(24)}
+        reasoning = {
+            "type": "reasoning",
+            "id": f"rs_mock{n}",
+            "summary": [],
+            "encrypted_content": secrets.token_urlsafe(24),
+        }
         if (body.get("reasoning") or {}).get("summary"):
             reasoning["summary"] = [{"type": "summary_text", "text": "Mock reasoning summary."}]
         fmt = ((body.get("text") or {}).get("format")) or {}
@@ -260,21 +296,47 @@ class MockOpenAI(_Mock):
         elif last.get("type") == "function_call_output":
             output = [reasoning, self.message(n, REPLY)]
         else:
-            output = [reasoning, {"type": "function_call", "id": f"fc_mock{n}", "call_id": f"call_mock{n}", "name": "list_documents", "arguments": "{}", "status": "completed"}]
+            output = [
+                reasoning,
+                {
+                    "type": "function_call",
+                    "id": f"fc_mock{n}",
+                    "call_id": f"call_mock{n}",
+                    "name": "list_documents",
+                    "arguments": "{}",
+                    "status": "completed",
+                },
+            ]
         return response(body.get("model", ""), output, n)
 
     @staticmethod
     def message(n: int, text: str) -> dict:
-        return {"type": "message", "id": f"msg_mock{n}", "role": "assistant", "status": "completed", "phase": "final_answer",
-                "content": [{"type": "output_text", "text": text, "annotations": []}]}
+        return {
+            "type": "message",
+            "id": f"msg_mock{n}",
+            "role": "assistant",
+            "status": "completed",
+            "phase": "final_answer",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+        }
 
 
 def response(model: str, output: list, n: int = 0, *, status: str = "completed", incomplete: str | None = None) -> dict:
     return {
-        "id": f"resp_mock{n}", "object": "response", "status": status, "model": f"{model}-2026-10-01", "output": output,
-        "error": None, "incomplete_details": {"reason": incomplete} if incomplete else None,
-        "usage": {"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 600, "cache_write_tokens": 300},
-                  "output_tokens": 120, "output_tokens_details": {"reasoning_tokens": 80}, "total_tokens": 1120},
+        "id": f"resp_mock{n}",
+        "object": "response",
+        "status": status,
+        "model": f"{model}-2026-10-01",
+        "output": output,
+        "error": None,
+        "incomplete_details": {"reason": incomplete} if incomplete else None,
+        "usage": {
+            "input_tokens": 1000,
+            "input_tokens_details": {"cached_tokens": 600, "cache_write_tokens": 300},
+            "output_tokens": 120,
+            "output_tokens_details": {"reasoning_tokens": 80},
+            "total_tokens": 1120,
+        },
     }
 
 
@@ -297,25 +359,49 @@ class MockGemini(_Mock):
     def _error(code: int, status: str, message: str, reason: str | None = None):
         err = {"code": code, "message": message, "status": status}
         if reason:
-            err["details"] = [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": reason, "domain": "googleapis.com"}]
+            err["details"] = [
+                {"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": reason, "domain": "googleapis.com"}
+            ]
         return code, {"error": err}, {}
 
     def answer(self, method, path, body, headers):
         if "key=" in path.partition("?")[2]:
-            return self._error(400, "INVALID_ARGUMENT", "pilot rule: the key goes in the x-goog-api-key header, never in the URL")
+            return self._error(
+                400, "INVALID_ARGUMENT", "pilot rule: the key goes in the x-goog-api-key header, never in the URL"
+            )
         key = headers.get("x-goog-api-key")
         if not key:
-            return self._error(403, "PERMISSION_DENIED", "Method doesn't allow unregistered callers (callers without established identity).")
+            return self._error(
+                403,
+                "PERMISSION_DENIED",
+                "Method doesn't allow unregistered callers (callers without established identity).",
+            )
         if self.key is not None and key != self.key:
-            return self._error(400, "INVALID_ARGUMENT", "API key not valid. Please pass a valid API key.", "API_KEY_INVALID")
+            return self._error(
+                400, "INVALID_ARGUMENT", "API key not valid. Please pass a valid API key.", "API_KEY_INVALID"
+            )
         path = path.split("?")[0]
         if method == "GET":
             m = re.fullmatch(r"/v1beta/models/([\w.\-]+)", path)
             if m and m.group(1) in GEMINI_MODELS:
                 name = m.group(1)
-                return 200, {"name": f"models/{name}", "baseModelId": name, "version": "001", "displayName": GEMINI_MODELS[name][0],
-                             "inputTokenLimit": 1048576, "outputTokenLimit": 65536, "supportedGenerationMethods": ["generateContent", "countTokens"], "thinking": True}, {}
-            return self._error(404, "NOT_FOUND", f"models/{m.group(1) if m else path} is not found for API version v1beta.")
+                return (
+                    200,
+                    {
+                        "name": f"models/{name}",
+                        "baseModelId": name,
+                        "version": "001",
+                        "displayName": GEMINI_MODELS[name][0],
+                        "inputTokenLimit": 1048576,
+                        "outputTokenLimit": 65536,
+                        "supportedGenerationMethods": ["generateContent", "countTokens"],
+                        "thinking": True,
+                    },
+                    {},
+                )
+            return self._error(
+                404, "NOT_FOUND", f"models/{m.group(1) if m else path} is not found for API version v1beta."
+            )
         m = re.fullmatch(r"/v1beta/models/([\w.\-]+):generateContent", path)
         if not m or m.group(1) not in GEMINI_MODELS:
             return self._error(404, "NOT_FOUND", f"{path} is not found.")
@@ -346,12 +432,16 @@ class MockGemini(_Mock):
         mode = (((body.get("toolConfig") or {}).get("functionCallingConfig")) or {}).get("mode", "AUTO")
         if mode not in ("AUTO", "ANY", "NONE", "VALIDATED"):
             return f"function_calling_config.mode {mode} is invalid"
-        if (((body.get("toolConfig") or {}).get("functionCallingConfig")) or {}).get("allowedFunctionNames") and mode not in ("ANY", "VALIDATED"):
+        if (((body.get("toolConfig") or {}).get("functionCallingConfig")) or {}).get(
+            "allowedFunctionNames"
+        ) and mode not in ("ANY", "VALIDATED"):
             return "allowed_function_names can only be set in ANY or VALIDATED mode"
         for tool in body.get("tools") or []:
             for d in tool.get("functionDeclarations") or []:
                 if not d.get("name") or ("parameters" in d and "parametersJsonSchema" in d):
-                    return "each function declaration needs a name and at most one of parameters and parametersJsonSchema"
+                    return (
+                        "each function declaration needs a name and at most one of parameters and parametersJsonSchema"
+                    )
         contents = body.get("contents") or []
         if not contents:
             return "contents is not specified"
@@ -363,13 +453,22 @@ class MockGemini(_Mock):
             if not parts:
                 return f"contents[{i}].parts must not be empty"
             if role == "model" and canon(c) not in self.handed:
-                return f"contents[{i}]: a model turn must be sent back exactly as it was returned, thought signatures included"
+                return (
+                    f"contents[{i}]: a model turn must be sent back exactly as it was returned, "
+                    "thought signatures included"
+                )
             responses = [p["functionResponse"] for p in parts if "functionResponse" in p]
             if responses:
-                calls = [p["functionCall"] for p in (previous or {}).get("parts", []) if "functionCall" in p] if (previous or {}).get("role") == "model" else []
+                calls = (
+                    [p["functionCall"] for p in (previous or {}).get("parts", []) if "functionCall" in p]
+                    if (previous or {}).get("role") == "model"
+                    else []
+                )
                 if [r.get("name") for r in responses] != [fc.get("name") for fc in calls]:
-                    return f"contents[{i}]: function responses must answer the function calls of the turn before, in order"
-                for r, fc in zip(responses, calls):
+                    return (
+                        f"contents[{i}]: function responses must answer the function calls of the turn before, in order"
+                    )
+                for r, fc in zip(responses, calls, strict=True):
                     if fc.get("id") and r.get("id") != fc["id"]:
                         return f"contents[{i}]: function response for {fc['name']} must carry the call's id"
                     if not isinstance(r.get("response"), dict):
@@ -383,7 +482,9 @@ class MockGemini(_Mock):
         self.n += 1
         n = self.n
         sig = secrets.token_urlsafe(24)
-        allowed = ((((body.get("toolConfig") or {}).get("functionCallingConfig")) or {}).get("allowedFunctionNames")) or []
+        allowed = (
+            (((body.get("toolConfig") or {}).get("functionCallingConfig")) or {}).get("allowedFunctionNames")
+        ) or []
         last = (body.get("contents") or [{}])[-1].get("parts") or []
         if allowed:
             parts = [{"functionCall": {"name": allowed[0], "args": ALLOW}, "thoughtSignature": sig}]
@@ -391,7 +492,10 @@ class MockGemini(_Mock):
             call = {"name": "list_documents", "args": {}}
             if self.call_ids:
                 call["id"] = f"fc-mock-{n}"
-            parts = [{"text": "Mock thought summary.", "thought": True}, {"functionCall": call, "thoughtSignature": sig}]
+            parts = [
+                {"text": "Mock thought summary.", "thought": True},
+                {"functionCall": call, "thoughtSignature": sig},
+            ]
         else:
             parts = [{"text": REPLY, "thoughtSignature": sig}]  # a signature can sit on a text part
         return candidate(model, parts, n=n)
@@ -400,8 +504,15 @@ class MockGemini(_Mock):
 def candidate(model: str, parts: list, finish: str = "STOP", n: int = 0) -> dict:
     return {
         "candidates": [{"content": {"role": "model", "parts": parts}, "finishReason": finish, "index": 0}],
-        "usageMetadata": {"promptTokenCount": 1000, "cachedContentTokenCount": 400, "candidatesTokenCount": 50, "thoughtsTokenCount": 70, "totalTokenCount": 1120},
-        "modelVersion": f"{model}-001", "responseId": f"mock-response-{n}",
+        "usageMetadata": {
+            "promptTokenCount": 1000,
+            "cachedContentTokenCount": 400,
+            "candidatesTokenCount": 50,
+            "thoughtsTokenCount": 70,
+            "totalTokenCount": 1120,
+        },
+        "modelVersion": f"{model}-001",
+        "responseId": f"mock-response-{n}",
     }
 
 
@@ -425,8 +536,12 @@ class MockProviders:
                     status, payload, headers = 404, {"error": {"message": "not found"}}, {}
                 else:
                     with mock.lock:
-                        mock.requests.append({"method": method, "path": "/" + rest, "body": body, "headers": dict(self.headers)})
-                        status, payload, headers = mock.answer(method, "/" + rest, body, {k.lower(): v for k, v in self.headers.items()})
+                        mock.requests.append(
+                            {"method": method, "path": "/" + rest, "body": body, "headers": dict(self.headers)}
+                        )
+                        status, payload, headers = mock.answer(
+                            method, "/" + rest, body, {k.lower(): v for k, v in self.headers.items()}
+                        )
                 data = json.dumps(payload).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -455,7 +570,5 @@ if __name__ == "__main__":
     mocks = MockProviders(port)
     print(f"Mock OpenAI API on http://127.0.0.1:{port}/openai/v1 (key {OPENAI_KEY})")
     print(f"Mock Gemini API on http://127.0.0.1:{port}/gemini/v1beta (key {GEMINI_KEY}). Ctrl-C stops them.")
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         mocks.server.serve_forever()
-    except KeyboardInterrupt:
-        pass

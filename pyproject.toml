@@ -14,7 +14,10 @@ authors = [{ name = "Konstantinos Toulis" }]
 dependencies = ["anthropic>=2.5,<3"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.17.4,<0.18", "mypy>=2.4,<2.5"]
+
+[project.scripts]
+authz-pilot = "authz_pilot.__main__:cli"
 
 [tool.setuptools]
 packages = ["authz_pilot"]
@@ -25,3 +28,32 @@ authz_pilot = ["web/*", "web/fonts/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [".", "tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["authz_pilot/web"]
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, isort, pyupgrade, bugbear, comprehensions, simplify and ruff's own rules.
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+# Reports, transcripts and test data use typographic characters on purpose:
+# × (multiplication sign), – (en dash) and ‐ (hyphen).
+allowed-confusables = ["×", "–", "‐"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["authz_pilot"]
+combine-as-imports = true
+
+[tool.mypy]
+files = ["authz_pilot"]
+python_version = "3.11"
+# Check the bodies of functions without annotations too: most helpers here are only partly annotated.
+check_untyped_defs = true
+# The code reuses short local names (key, keys, kind) for different things in different branches.
+allow_redefinition = true
+no_implicit_optional = true
+strict_equality = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true

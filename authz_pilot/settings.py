@@ -41,7 +41,9 @@ class Provider:
 PROVIDERS = {
     "anthropic": Provider("Anthropic", ("ANTHROPIC_API_KEY",), "anthropic-api-key", "api-key", "the Claude Console"),
     "openai": Provider("OpenAI", ("OPENAI_API_KEY",), "openai-api-key", "openai-api-key", "the OpenAI API dashboard"),
-    "google": Provider("Google", ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "gemini-api-key", "gemini-api-key", "Google AI Studio"),
+    "google": Provider(
+        "Google", ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "gemini-api-key", "gemini-api-key", "Google AI Studio"
+    ),
 }
 KEYCHAIN_SERVICE = PROVIDERS["anthropic"].keychain
 LIMITS = {"max_cost": (0.01, 1000.0), "max_steps": (1, 20), "workers": (1, 16)}
@@ -188,7 +190,9 @@ def keychain_key(provider: str = "anthropic") -> str | None:
     try:
         out = subprocess.run(
             ["/usr/bin/security", "find-generic-password", "-s", PROVIDERS[provider].keychain, "-w"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
         return None

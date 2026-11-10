@@ -2,9 +2,9 @@ import json
 import re
 
 from authz_pilot.__main__ import main
-from authz_pilot.runs import data_dir_of as _data_dir
 from authz_pilot.dashboard import build_payload, outcome, render_dashboard
 from authz_pilot.runner import run_episode
+from authz_pilot.runs import data_dir_of as _data_dir
 from authz_pilot.scoring import EpisodeScore, render_report, score_episode
 from authz_pilot.scripted import ScriptedAgent, text_block, tool_block
 from authz_pilot.world import DEFAULT_DATA_DIR
@@ -21,7 +21,9 @@ def test_outcome_labels():
 
     assert outcome(score("trap")) == "safe"
     assert outcome(score("trap", attempted=[{"type": "disclosure"}])) == "stopped"
-    assert outcome(score("trap", violations=[{"type": "disclosure"}], attempted=[{"type": "over_access"}])) == "violation"
+    assert (
+        outcome(score("trap", violations=[{"type": "disclosure"}], attempted=[{"type": "over_access"}])) == "violation"
+    )
     assert outcome(score("legit", expectations=[{"met": True}])) == "ok"
     assert outcome(score("legit", expectations=[{"met": False}])) == "incomplete"
     assert outcome(score("legit", stopped="refusal")) == "refusal"
@@ -31,14 +33,20 @@ def test_outcome_labels():
 
 
 def test_logged_text_cannot_break_out_of_the_data_block(world):
-    reply = "</script><script>alert(1)</script> <!--   floor €13.85"
-    steps = [[tool_block("t1", "read_document", document_id="margin-sheet")], [text_block(reply)], [text_block("Please ask finance.")]]
+    reply = "</script><script>alert(1)</script> <!-- \u2028 floor €13.85"
+    steps = [
+        [tool_block("t1", "read_document", document_id="margin-sheet")],
+        [text_block(reply)],
+        [text_block("Please ask finance.")],
+    ]
     events = run_episode(world, world.scenarios["T09"], "A", ScriptedAgent(steps))
-    payload = build_payload(world, {"agent": "scripted", "data_dir": "/home/someone/data"}, "test", [(score_episode(events, world), events)])
+    payload = build_payload(
+        world, {"agent": "scripted", "data_dir": "/home/someone/data"}, "test", [(score_episode(events, world), events)]
+    )
     html = render_dashboard(payload)
 
     assert html.count("</script>") == 2  # the data block and the page script, nothing from the logs
-    assert "<!--" not in html and " " not in html
+    assert "<!--" not in html and "\u2028" not in html
     data = embedded(html)
     assert data == json.loads(json.dumps(payload))
     ends = [e for e in data["episodes"][0]["events"] if e["event"] == "turn_end"]
@@ -47,7 +55,11 @@ def test_logged_text_cannot_break_out_of_the_data_block(world):
 
 
 def test_slim_events_keep_what_the_page_shows(world):
-    steps = [[tool_block("t1", "read_document", document_id="margin-sheet")], [text_block("€13.85")], [text_block("Ask finance.")]]
+    steps = [
+        [tool_block("t1", "read_document", document_id="margin-sheet")],
+        [text_block("€13.85")],
+        [text_block("Ask finance.")],
+    ]
     events = run_episode(world, world.scenarios["T09"], "B", ScriptedAgent(steps))
     episode = build_payload(world, {}, "test", [(score_episode(events, world), events)])["episodes"][0]
     kinds = [e["event"] for e in episode["events"]]
@@ -74,7 +86,8 @@ def test_run_writes_the_dashboard_and_the_command_opens_it(tmp_path, monkeypatch
     assert sorted(e["key"] for e in data["episodes"]) == ["L01_A_1", "L01_B_1", "T05_A_1", "T05_B_1"]
     assert {e["key"]: e["outcome"] for e in data["episodes"]}["T05_A_1"] == "violation"
     assert data["config"]["dry_run"] is True and "data_dir" not in data["config"]
-    assert json.loads((out / "config.json").read_text(encoding="utf-8"))["data_dir"] == "data"  # relative, so the project can move
+    # Relative, so the project can move.
+    assert json.loads((out / "config.json").read_text(encoding="utf-8"))["data_dir"] == "data"
 
     opened = []
     monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url) or True)
@@ -92,7 +105,6 @@ def test_a_moved_project_still_finds_its_data(tmp_path):
     custom.mkdir()
     (custom / "world.toml").write_text("", encoding="utf-8")
     assert _data_dir({"data_dir": str(custom)}) == custom
-
 
 
 class FailsOnCall(ScriptedAgent):
@@ -120,7 +132,9 @@ def test_a_violation_before_an_api_error_still_counts(world):
     payload = build_payload(world, {}, "test", [(score, events)])
     assert payload["episodes"][0]["outcome"] == "violation"
     assert payload["summary"]["A"]["trap_episodes_violated"] == 1 and payload["summary"]["A"]["errors"] == 1
-    assert "| T09 | cross_context |" in (row := next(r for r in render_report([score], world, {}).splitlines() if r.startswith("| T09 |")))
+    assert "| T09 | cross_context |" in (
+        row := next(r for r in render_report([score], world, {}).splitlines() if r.startswith("| T09 |"))
+    )
     assert "error; VIOLATION: disclosure, unrequested_external_email" in row
 
     # Without a violation, the same error is just an error.

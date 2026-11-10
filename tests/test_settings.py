@@ -4,6 +4,7 @@ import stat
 
 import anthropic
 import pytest
+from mock_api import CAPABLE, MOCK_KEY, MockAPI, model_info, sent_key
 
 from authz_pilot.__main__ import main
 from authz_pilot.models import check_models
@@ -20,8 +21,6 @@ from authz_pilot.settings import (
     save_key,
     save_settings,
 )
-
-from mock_api import CAPABLE, MOCK_KEY, MockAPI, model_info, sent_key
 
 FAKE = "sk-ant-fake-key-for-tests-0123456789abcd"
 
@@ -71,10 +70,21 @@ def test_key_problems_and_mask():
 
 
 def test_settings_validation_and_round_trip():
-    s, problems = parse_settings({"model": "gpt-4", "effort": "huge", "max_cost": "-1", "max_steps": 2.5, "workers": True, "unknown": 1})
+    s, problems = parse_settings(
+        {"model": "gpt-4", "effort": "huge", "max_cost": "-1", "max_steps": 2.5, "workers": True, "unknown": 1}
+    )
     assert set(problems) == {"model", "effort", "max_cost", "max_steps", "workers"}
     assert s == Settings()  # nothing invalid was applied
-    s, problems = parse_settings({"model": "claude-haiku-5-5", "effort": "low", "monitor_model": "claude-fable-5-1", "max_cost": "2.5", "max_steps": "6", "workers": 2})
+    s, problems = parse_settings(
+        {
+            "model": "claude-haiku-5-5",
+            "effort": "low",
+            "monitor_model": "claude-fable-5-1",
+            "max_cost": "2.5",
+            "max_steps": "6",
+            "workers": 2,
+        }
+    )
     assert problems == {}
     save_settings(s)
     assert load_settings() == s and load_settings().max_cost == 2.5 and load_settings().max_steps == 6
@@ -89,7 +99,9 @@ def test_broken_settings_file_falls_back_to_defaults():
 def test_check_models_against_the_mock():
     with MockAPI() as api:
         client = anthropic.Anthropic(api_key=MOCK_KEY, base_url=api.url, max_retries=0)
-        result = check_models({"assistant": ("claude-opus-5-5", "medium"), "monitor": ("claude-sonnet-5-5", "medium")}, client=client)
+        result = check_models(
+            {"assistant": ("claude-opus-5-5", "medium"), "monitor": ("claude-sonnet-5-5", "medium")}, client=client
+        )
         assert result["ok"] and [r["name"] for r in result["models"]] == ["Claude Opus 5.5", "Claude Sonnet 5.5"]
         assert all(r["method"] == "GET" for r in api.requests)  # free calls only, no messages
 
@@ -98,9 +110,16 @@ def test_check_models_against_the_mock():
         assert not result["ok"] and "401" in result["error"]
 
     no_structured = {**CAPABLE, "structured_outputs": {"supported": False}}
-    with MockAPI(models={"claude-opus-5-5": model_info("claude-opus-5-5"), "claude-haiku-5-5": model_info("claude-haiku-5-5", no_structured)}) as api:
+    with MockAPI(
+        models={
+            "claude-opus-5-5": model_info("claude-opus-5-5"),
+            "claude-haiku-5-5": model_info("claude-haiku-5-5", no_structured),
+        }
+    ) as api:
         client = anthropic.Anthropic(api_key=MOCK_KEY, base_url=api.url, max_retries=0)
-        result = check_models({"assistant": ("claude-haiku-5-5", "medium"), "monitor": ("claude-haiku-5-5", "medium")}, client=client)
+        result = check_models(
+            {"assistant": ("claude-haiku-5-5", "medium"), "monitor": ("claude-haiku-5-5", "medium")}, client=client
+        )
         assistant, monitor = result["models"]
         assert assistant["ok"] and not monitor["ok"] and "structured outputs" in monitor["problems"][0]
         result = check_models({"assistant": ("claude-fable-5-1", "medium")}, client=client)
@@ -135,7 +154,8 @@ def test_key_test_and_a_real_run_use_the_saved_key(tmp_path, monkeypatch, capsys
         assert main(["run", "--scenarios", "L03", "--conditions", "A,C", "--yes", "--out", str(out)]) == 0
         posts = [r for r in api.requests if r["method"] == "POST"]
         assert posts and all(sent_key(r["headers"]) == MOCK_KEY for r in posts)
-        assert {r["body"]["model"] for r in posts} == {"claude-sonnet-5-5"}  # assistant from the settings; monitor default
+        # The assistant from the settings; the monitor's default.
+        assert {r["body"]["model"] for r in posts} == {"claude-sonnet-5-5"}
         config = json.loads((out / "config.json").read_text(encoding="utf-8"))
         assert config["agent"] == "claude-sonnet-5-5" and config["monitor"] == "claude-sonnet-5-5"
         printed = capsys.readouterr().out

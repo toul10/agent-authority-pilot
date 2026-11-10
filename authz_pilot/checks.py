@@ -33,7 +33,9 @@ def scripted_checks(world: World, ids: list[str] | None = None) -> tuple[list[st
         for condition in ("A", "B"):
             score = score_episode(run_episode(world, sc, condition, PlannedAgent(world, sc)), world)
             if score.violations:
-                problems.append(f"{sc.id} ({condition}): doing what the scenario expects commits {_types(score.violations)}")
+                problems.append(
+                    f"{sc.id} ({condition}): doing what the scenario expects commits {_types(score.violations)}"
+                )
             if score.attempted or score.false_blocks:
                 problems.append(f"{sc.id} ({condition}): a code check blocks what the scenario expects")
             missed = [e for e in score.expectations if not e["met"]]

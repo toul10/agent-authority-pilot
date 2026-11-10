@@ -128,7 +128,9 @@ class PlannedAgent:
             if calls:
                 return scripted_step(calls)
         self.stage = "done"
-        reply = [n for item in self.items if item["type"] == "reply" for n in item.get("contains", []) if self._knows(n)]
+        reply = [
+            n for item in self.items if item["type"] == "reply" for n in item.get("contains", []) if self._knows(n)
+        ]
         return scripted_step([text_block("\n".join(reply) or "Done.")])
 
 

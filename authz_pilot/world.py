@@ -15,6 +15,7 @@ from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
@@ -40,6 +41,7 @@ class CustomScenarioError(ValueError):
 
 class CustomWorldError(CustomScenarioError):
     """The file with your additions to the company cannot be used."""
+
 
 TRAP_TYPES = ("injection", "false_authority", "cross_context", "permission_change")
 EXPECT_TYPES = ("reply", "email", "approve")
@@ -103,7 +105,7 @@ _REQUEST_ID = re.compile(r"^\s*([A-Za-z]+)[\s\-_]*(\d+)\s*$")
 
 
 def normalize_request_id(value: str) -> str:
-    """"dr 12", "DR12" and "DR-12" all become "DR-12"."""
+    """ "dr 12", "DR12" and "DR-12" all become "DR-12"."""
     m = _REQUEST_ID.match(value)
     return f"{m.group(1).upper()}-{m.group(2)}" if m else value.strip().upper()
 
@@ -353,9 +355,10 @@ ADDITION_SECTIONS = ("company", "roles", "people", "contacts", "documents", "req
 ADDITION_KINDS = ("roles", "request_types", "people", "contacts", "documents", "requests")
 
 
-def _strict(value, kind: type, where: str):
+def _strict(value: Any, kind: type[Any], where: str) -> Any:
     if not isinstance(value, kind) or (kind is list and not all(isinstance(v, str) for v in value)):
-        expected = {str: "text", list: "a list of text", dict: "a table"}[kind]
+        names: dict[type, str] = {str: "text", list: "a list of text", dict: "a table"}
+        expected = names[kind]
         raise CustomWorldError(f"{where} should be {expected}")
     return value
 
@@ -379,7 +382,9 @@ def merge_additions(world: World, raw: dict) -> World:
         raise CustomWorldError(f"unknown section [{unknown[0]}]; the sections are {', '.join(ADDITION_SECTIONS)}")
     company = _strict(raw.get("company", {}), dict, "[company]")
     if set(company) - {"request_prefixes"}:
-        raise CustomWorldError("[company] takes only request_prefixes: the company's name and description stay as published")
+        raise CustomWorldError(
+            "[company] takes only request_prefixes: the company's name and description stay as published"
+        )
     prefixes = _strict(company.get("request_prefixes", {}), dict, "request_prefixes")
     roles = _strict(raw.get("roles", {}), dict, "[roles]")
     sections = {k: raw.get(k, []) for k in ("people", "contacts", "documents", "requests")}
@@ -404,7 +409,11 @@ def merge_additions(world: World, raw: dict) -> World:
         _strict(role, dict, where)
         if rid in all_roles:
             raise CustomWorldError(f"role id {rid!r} is already in the company")
-        all_roles[rid] = {"label": _field(role, "label", where), "read": list(_field(role, "read", where, list)), "approve": list(_field(role, "approve", where, list))}
+        all_roles[rid] = {
+            "label": _field(role, "label", where),
+            "read": list(_field(role, "read", where, list)),
+            "approve": list(_field(role, "approve", where, list)),
+        }
         added["roles"].append(rid)
 
     people = dict(world.people)
@@ -475,7 +484,13 @@ def _with_additions(world: World, path: Path) -> World:
     return merged
 
 
-def load_world(data_dir: Path | str = DEFAULT_DATA_DIR, custom: Path | str | None = None, custom_world: Path | str | None = None, *, strict: bool = True) -> World:
+def load_world(
+    data_dir: Path | str = DEFAULT_DATA_DIR,
+    custom: Path | str | None = None,
+    custom_world: Path | str | None = None,
+    *,
+    strict: bool = True,
+) -> World:
     """The built-in world and scenarios, plus your own scenarios from `custom` and your additions
     to the company from `custom_world`, for each of those files that exists.
 
@@ -558,7 +573,9 @@ def _company_problems(world: World) -> list[str]:
             problems.append(f"role {rid}: every role may see public documents")
         for c in role["read"]:
             if not NAME.match(c):
-                problems.append(f"role {rid}: classification {c!r} uses lowercase letters, digits, - and _, starting with a letter")
+                problems.append(
+                    f"role {rid}: classification {c!r} uses lowercase letters, digits, - and _, starting with a letter"
+                )
         for t in role["approve"]:
             if t not in prefixes:
                 problems.append(f"role {rid}: request type {t!r} has no id prefix")
@@ -567,7 +584,9 @@ def _company_problems(world: World) -> list[str]:
             problems.append(f"{n} roles are called {label!r}")
     for rtype, prefix in prefixes.items():
         if not NAME.match(rtype):
-            problems.append(f"request type {rtype!r}: names use lowercase letters, digits, - and _, starting with a letter")
+            problems.append(
+                f"request type {rtype!r}: names use lowercase letters, digits, - and _, starting with a letter"
+            )
         if not PREFIX.match(prefix):
             problems.append(f"request type {rtype}: the id prefix {prefix!r} should be 1 to 5 capital letters, like DR")
         if rtype not in request_types:
@@ -628,7 +647,11 @@ def validate(world: World) -> list[str]:
             for other in all_documents.values():
                 if contains_value(other.title, canary):
                     problems.append(f"{doc.id}: canary {canary!r} appears in the title of {other.id}")
-                if other.id != doc.id and other.classification != doc.classification and contains_value(other.body, canary):
+                if (
+                    other.id != doc.id
+                    and other.classification != doc.classification
+                    and contains_value(other.body, canary)
+                ):
                     problems.append(f"{doc.id}: canary {canary!r} also appears in {other.id} ({other.classification})")
 
     def canaries_in(text: str) -> list[tuple[Document, str]]:
@@ -689,7 +712,10 @@ def validate(world: World) -> list[str]:
                 problems.append(f"{where}: injected text contains canary {c!r} of {d.id}")
         for doc in sc.extra_documents:
             if doc.classification in classifications and doc.classification not in w.classifications():
-                problems.append(f"{where}: document {doc.id} is classified {doc.classification!r}, which only your additions to the company have")
+                problems.append(
+                    f"{where}: document {doc.id} is classified {doc.classification!r}, which only your additions to "
+                    "the company have"
+                )
 
         perms = Permissions(w)
         classes, types = set(w.classifications()), set(w.request_types())
@@ -742,7 +768,9 @@ def validate(world: World) -> list[str]:
                 for needle in e.get("contains", []):
                     for d, c in canaries_in(needle):
                         if d.classification not in perms.cleared_for(audience):
-                            problems.append(f"{at}: expectation needs canary {c!r} of {d.id} for {audience}, who is not cleared")
+                            problems.append(
+                                f"{at}: expectation needs canary {c!r} of {d.id} for {audience}, who is not cleared"
+                            )
 
             for b in turn.bait:
                 kind = b.get("type")

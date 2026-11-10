@@ -19,6 +19,7 @@ import unicodedata
 from dataclasses import replace
 from pathlib import Path
 from string import ascii_uppercase
+from typing import Any
 
 from .custom import _DOC_ID, _Form, _friendly, _key, _value
 from .world import CustomWorldError, World, merge_additions, normalize_request_id, validate
@@ -35,7 +36,16 @@ LIMITS = {"label": 60, "name": 120, "email": 200, "title": 120, "body": 6000, "i
 # are no more requests than documents. The app's request size limit (MAX_BODY, 8 MB) is
 # far above any real form: 100 documents of 6,000 characters are at most 1.8 MB, even when every
 # character takes three bytes.
-COUNTS = {"roles": 50, "request_types": 30, "people": 200, "contacts": 100, "documents": 100, "requests": 100, "canaries": 50, "names": 50}
+COUNTS = {
+    "roles": 50,
+    "request_types": 30,
+    "people": 200,
+    "contacts": 100,
+    "documents": 100,
+    "requests": 100,
+    "canaries": 50,
+    "names": 50,
+}
 SECTIONS = ("roles", "request_types", "people", "contacts", "documents", "requests")
 
 
@@ -43,7 +53,7 @@ SECTIONS = ("roles", "request_types", "people", "contacts", "documents", "reques
 
 
 # Greek letters in Latin, so that a name such as "Δανάη" still gives a readable id ("danai").
-_GREEK = dict(zip("αβγδεζηικλμνξοπρσςτυφω", "avgdeziiklmnxoprsstyfo")) | {"θ": "th", "χ": "ch", "ψ": "ps"}
+_GREEK = dict(zip("αβγδεζηικλμνξοπρσςτυφω", "avgdeziiklmnxoprsstyfo", strict=True)) | {"θ": "th", "χ": "ch", "ψ": "ps"}
 
 
 def _slug(text: str, sep: str, limit: int) -> str:
@@ -75,7 +85,9 @@ def _prefix_for(rtype: str, taken: set[str]) -> str:
         if candidate not in taken and len(candidate) >= 2:
             return candidate
     # Many types that start alike: DRB to DRZ, then the first letter and any two others.
-    more = [f"{letters[0]}R{chr(64 + n)}" for n in range(2, 27)] + [letters[0] + a + b for a in ascii_uppercase for b in ascii_uppercase]
+    more = [f"{letters[0]}R{chr(64 + n)}" for n in range(2, 27)] + [
+        letters[0] + a + b for a in ascii_uppercase for b in ascii_uppercase
+    ]
     return next((c for c in more if c not in taken), f"{letters[0]}RZ")
 
 
@@ -130,7 +142,9 @@ def clean_additions(form, world: World) -> tuple[dict, list[str]]:
             continue
         read = [_name(v) for v in f.words(r.get("read"), COUNTS["names"], f"{where}, may see")]
         read = ["public"] + [c for c in dict.fromkeys(read) if c != "public"]  # every role may see public documents
-        approve = list(dict.fromkeys(_name(v) for v in f.words(r.get("approve"), COUNTS["names"], f"{where}, may approve")))
+        approve = list(
+            dict.fromkeys(_name(v) for v in f.words(r.get("approve"), COUNTS["names"], f"{where}, may approve"))
+        )
         roles[rid] = {"label": label, "read": read, "approve": approve}
     if roles:
         raw["roles"] = roles
@@ -146,17 +160,22 @@ def clean_additions(form, world: World) -> tuple[dict, list[str]]:
         elif pid in taken:
             f.problems.append(f"{where}: the id {pid} is already taken.")
             continue
-        people.append({
-            "id": pid,
-            "name": name,
-            "role": f.text(p.get("role"), LIMITS["word"] + 1, f"{where}, role", required=True),
-            "email": f.text(p.get("email"), LIMITS["email"], f"{where}, email", required=True),
-        })
+        people.append(
+            {
+                "id": pid,
+                "name": name,
+                "role": f.text(p.get("role"), LIMITS["word"] + 1, f"{where}, role", required=True),
+                "email": f.text(p.get("email"), LIMITS["email"], f"{where}, email", required=True),
+            }
+        )
     if people:
         raw["people"] = people
 
     contacts = [
-        {"name": f.text(c.get("name"), LIMITS["name"], f"{where}, name", required=True), "email": f.text(c.get("email"), LIMITS["email"], f"{where}, email", required=True)}
+        {
+            "name": f.text(c.get("name"), LIMITS["name"], f"{where}, name", required=True),
+            "email": f.text(c.get("email"), LIMITS["email"], f"{where}, email", required=True),
+        }
         for where, c in rows("contacts", "Contacts", "Contact")
     ]
     if contacts:
@@ -174,10 +193,12 @@ def clean_additions(form, world: World) -> tuple[dict, list[str]]:
         elif did in taken:
             f.problems.append(f"{where}: the id {did} is already taken.")
             continue
-        doc = {
+        doc: dict[str, Any] = {
             "id": did,
             "title": title,
-            "classification": _name(f.text(d.get("classification"), LIMITS["word"] + 1, f"{where}, classification", required=True)),
+            "classification": _name(
+                f.text(d.get("classification"), LIMITS["word"] + 1, f"{where}, classification", required=True)
+            ),
             "body": f.text(d.get("body"), LIMITS["body"], f"{where}, text", multiline=True, required=True),
         }
         canaries = f.words(d.get("canaries"), COUNTS["canaries"], f"{where}, protected values")
@@ -221,15 +242,28 @@ def to_form(raw: dict) -> dict:
     as_dicts = lambda v: [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []  # noqa: E731
     texts = lambda v: [x for x in v if isinstance(x, str)] if isinstance(v, list) else []  # noqa: E731
     text = lambda v: v if isinstance(v, str) else ""  # noqa: E731
-    company = raw.get("company") if isinstance(raw.get("company"), dict) else {}
-    prefixes = company.get("request_prefixes") if isinstance(company.get("request_prefixes"), dict) else {}
-    roles = raw.get("roles") if isinstance(raw.get("roles"), dict) else {}
+    company = v if isinstance(v := raw.get("company"), dict) else {}
+    prefixes = v if isinstance(v := company.get("request_prefixes"), dict) else {}
+    roles = v if isinstance(v := raw.get("roles"), dict) else {}
     return {
-        "roles": [{"id": rid, "label": text(r.get("label")), "read": texts(r.get("read")), "approve": texts(r.get("approve"))} for rid, r in roles.items() if isinstance(r, dict)],
+        "roles": [
+            {"id": rid, "label": text(r.get("label")), "read": texts(r.get("read")), "approve": texts(r.get("approve"))}
+            for rid, r in roles.items()
+            if isinstance(r, dict)
+        ],
         "request_types": [{"type": t, "prefix": text(p)} for t, p in prefixes.items()],
         "people": [{k: text(p.get(k)) for k in ("id", "name", "role", "email")} for p in as_dicts(raw.get("people"))],
         "contacts": [{k: text(c.get(k)) for k in ("name", "email")} for c in as_dicts(raw.get("contacts"))],
-        "documents": [{"id": text(d.get("id")), "title": text(d.get("title")), "classification": text(d.get("classification")), "body": text(d.get("body")).strip(), "canaries": texts(d.get("canaries"))} for d in as_dicts(raw.get("documents"))],
+        "documents": [
+            {
+                "id": text(d.get("id")),
+                "title": text(d.get("title")),
+                "classification": text(d.get("classification")),
+                "body": text(d.get("body")).strip(),
+                "canaries": texts(d.get("canaries")),
+            }
+            for d in as_dicts(raw.get("documents"))
+        ],
         "requests": [{k: text(r.get(k)) for k in ("id", "type", "document")} for r in as_dicts(raw.get("requests"))],
     }
 
@@ -250,7 +284,13 @@ def check_additions(world: World, raw: dict) -> dict:
     a custom world).
     """
     published = world.base or world
-    builtin = replace(published, scenarios={k: v for k, v in world.scenarios.items() if not v.custom}, base=None, additions={}, custom_world_hash="")
+    builtin = replace(
+        published,
+        scenarios={k: v for k, v in world.scenarios.items() if not v.custom},
+        base=None,
+        additions={},
+        custom_world_hash="",
+    )
     mine = {k: v for k, v in world.scenarios.items() if v.custom}
     before = set(validate(builtin))
     try:

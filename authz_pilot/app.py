@@ -31,21 +31,66 @@ import webbrowser
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
 from . import __version__
-from .additions import COUNTS as ADD_COUNTS, LIMITS as ADD_LIMITS, additions_toml, check_additions, clean_additions, load_additions_raw, save_additions, to_form
+from .additions import (
+    COUNTS as ADD_COUNTS,
+    LIMITS as ADD_LIMITS,
+    additions_toml,
+    check_additions,
+    clean_additions,
+    load_additions_raw,
+    save_additions,
+    to_form,
+)
 from .custom import COUNTS, LIMITS, check_scenario, clean_form, dump, load_raw, next_id, remove, upsert
 from .dashboard import SHORT, build_payload, outcome, render_dashboard
 from .models import EFFORTS, MODEL_INFO, model_notes, provider_of
 from .providers import BASE_ENV, check_models
 from .runner import CONDITIONS, episode_path, is_complete, read_events
-from .runs import RunError, estimate_cost, execute, jobs_of, list_runs, load_run, plan_run, providers_needed, results_dir
+from .runs import (
+    RunError,
+    estimate_cost,
+    execute,
+    jobs_of,
+    list_runs,
+    load_run,
+    plan_run,
+    providers_needed,
+    results_dir,
+)
 from .scoring import score_episode
-from .settings import LIMITS as SETTING_LIMITS
+from .settings import (
+    LIMITS as SETTING_LIMITS,
+    PROVIDERS,
+    describe_source,
+    env_key,
+    key_path,
+    load_settings,
+    mask,
+    parse_settings,
+    remove_key,
+    resolve_key,
+    save_key,
+    save_settings,
+    settings_path,
+)
 from .tools import ACTION_NOTES, REPLY_NOTE, SIDE_EFFECT_TOOLS, TOOLS
-from .settings import PROVIDERS, describe_source, env_key, key_path, load_settings, mask, parse_settings, remove_key, resolve_key, save_key, save_settings, settings_path
-from .world import BAIT_TYPES, CUSTOM_ID, DEFAULT_DATA_DIR, EXPECT_TYPES, TRAP_TYPES, CustomScenarioError, CustomWorldError, World, custom_path, custom_world_path, load_world
+from .world import (
+    BAIT_TYPES,
+    CUSTOM_ID,
+    DEFAULT_DATA_DIR,
+    EXPECT_TYPES,
+    TRAP_TYPES,
+    CustomScenarioError,
+    CustomWorldError,
+    World,
+    custom_path,
+    custom_world_path,
+    load_world,
+)
 
 WEB = Path(__file__).parent / "web"
 STATIC = {
@@ -77,7 +122,10 @@ def script_hashes(html: str) -> list[str]:
 
 def dashboard_csp(html: str) -> str:
     # The run's dashboard is shown inside the app, so only this server may frame it.
-    return f"default-src 'none'; script-src {' '.join(script_hashes(html))}; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+    return (
+        f"default-src 'none'; script-src {' '.join(script_hashes(html))}; style-src 'unsafe-inline'; "
+        "img-src data:; font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+    )
 
 
 class ApiError(Exception):
@@ -89,7 +137,16 @@ class ApiError(Exception):
 def resume_command(plan) -> str:
     """The command that finishes an interrupted run from the command line."""
     c = plan.config
-    parts = ["python -m authz_pilot run", "--out", shlex.quote(str(plan.out)), "--scenarios", ",".join(c["scenarios"]), "--conditions", ",".join(c["conditions"]), "--repeats", str(c["repeats"]), "--max-steps", str(c["max_steps"])]
+    # fmt: off
+    parts = [
+        "python -m authz_pilot run",
+        "--out", shlex.quote(str(plan.out)),
+        "--scenarios", ",".join(c["scenarios"]),
+        "--conditions", ",".join(c["conditions"]),
+        "--repeats", str(c["repeats"]),
+        "--max-steps", str(c["max_steps"]),
+    ]
+    # fmt: on
     if c.get("dry_run"):
         parts.append("--dry-run")
     else:
@@ -133,7 +190,14 @@ class LiveRun:
 
 
 class App:
-    def __init__(self, *, results: Path | None = None, data_dir: Path = DEFAULT_DATA_DIR, custom: Path | None = None, custom_world: Path | None = None):
+    def __init__(
+        self,
+        *,
+        results: Path | None = None,
+        data_dir: Path = DEFAULT_DATA_DIR,
+        custom: Path | None = None,
+        custom_world: Path | None = None,
+    ):
         self.results = Path(results or results_dir())
         self.data_dir = Path(data_dir)
         self.custom = Path(custom or custom_path())
@@ -172,7 +236,7 @@ class App:
 
     # ------------------------------------------------------------------ routes
 
-    ROUTES = [
+    ROUTES: ClassVar[list[tuple[str, str, str]]] = [
         ("GET", r"/api/status", "status"),
         ("GET", r"/api/world", "world_info"),
         ("GET", r"/api/scenarios", "scenarios"),
@@ -220,7 +284,16 @@ class App:
         out = []
         for provider, roles in providers_needed(settings, conditions).items():
             k = self.key_status(provider)
-            out.append({"provider": provider, "name": PROVIDERS[provider].name, "api": API_NAMES[provider], "roles": roles, "present": k["present"], "masked": k["masked"]})
+            out.append(
+                {
+                    "provider": provider,
+                    "name": PROVIDERS[provider].name,
+                    "api": API_NAMES[provider],
+                    "roles": roles,
+                    "present": k["present"],
+                    "masked": k["masked"],
+                }
+            )
         return out
 
     def status(self, body: dict) -> dict:
@@ -229,14 +302,35 @@ class App:
             "version": __version__,
             "key": self.key_status(),
             "keys": {p: self.key_status(p) for p in PROVIDERS},
-            "providers": {p: {"name": v.name, "console": v.console, "api": API_NAMES[p], "family": FAMILIES[p]} for p, v in PROVIDERS.items()},
+            "providers": {
+                p: {"name": v.name, "console": v.console, "api": API_NAMES[p], "family": FAMILIES[p]}
+                for p, v in PROVIDERS.items()
+            },
             "api_base": os.environ.get("ANTHROPIC_BASE_URL") or None,
             "api_bases": {p: os.environ[env] for p, env in BASE_ENV.items() if os.environ.get(env)},
             "settings": asdict(load_settings()),
             "limits": {k: list(v) for k, v in SETTING_LIMITS.items()},
-            "models": [{"id": m, "name": i.name, "price": list(i.price_on()), "provider": i.provider, "group": i.group, "efforts": list(i.effort_levels), "notes": {r: model_notes(i, r) for r in ("assistant", "monitor")}} for m, i in MODEL_INFO.items()],
+            "models": [
+                {
+                    "id": m,
+                    "name": i.name,
+                    "price": list(i.price_on()),
+                    "provider": i.provider,
+                    "group": i.group,
+                    "efforts": list(i.effort_levels),
+                    "notes": {r: model_notes(i, r) for r in ("assistant", "monitor")},
+                }
+                for m, i in MODEL_INFO.items()
+            ],
             "efforts": list(EFFORTS),
-            "paths": {"settings": str(settings_path()), "key": str(key_path()), "keys": {p: str(key_path(p)) for p in PROVIDERS}, "custom": str(self.custom), "custom_world": str(self.custom_world), "results": str(self.results)},
+            "paths": {
+                "settings": str(settings_path()),
+                "key": str(key_path()),
+                "keys": {p: str(key_path(p)) for p in PROVIDERS},
+                "custom": str(self.custom),
+                "custom_world": str(self.custom_world),
+                "results": str(self.results),
+            },
             "run": {"name": current.name, "status": current.status} if current else None,
             "quick_start": QUICK_START,
         }
@@ -284,17 +378,51 @@ class App:
             raw, raw_error = load_additions_raw(self.custom_world), ""
         except CustomWorldError as exc:
             raw, raw_error = {}, str(exc)
-        actions = [{"name": t["name"], "does": ACTION_NOTES[t["name"]][0], "check": ACTION_NOTES[t["name"]][1], "reviewed": t["name"] in SIDE_EFFECT_TOOLS} for t in TOOLS]
+        actions = [
+            {
+                "name": t["name"],
+                "does": ACTION_NOTES[t["name"]][0],
+                "check": ACTION_NOTES[t["name"]][1],
+                "reviewed": t["name"] in SIDE_EFFECT_TOOLS,
+            }
+            for t in TOOLS
+        ]
         actions.append({"name": "reply", "does": REPLY_NOTE[0], "check": REPLY_NOTE[1], "reviewed": True})
         return {
             "company": w.company.get("name", ""),
             "company_description": w.company.get("description", ""),
             "actions": actions,
-            "roles": {k: {"label": r["label"], "read": r["read"], "approve": r["approve"], "yours": w.is_yours("roles", k)} for k, r in w.roles.items()},
-            "people": [{"id": p.id, "name": p.name, "role": p.role, "role_label": w.role_label(p), "email": p.email, "yours": w.is_yours("people", p.id)} for p in w.people.values()],
+            "roles": {
+                k: {"label": r["label"], "read": r["read"], "approve": r["approve"], "yours": w.is_yours("roles", k)}
+                for k, r in w.roles.items()
+            },
+            "people": [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "role": p.role,
+                    "role_label": w.role_label(p),
+                    "email": p.email,
+                    "yours": w.is_yours("people", p.id),
+                }
+                for p in w.people.values()
+            ],
             "contacts": [c | {"yours": w.is_yours("contacts", k)} for k, c in w.contacts.items()],
-            "documents": [{"id": d.id, "title": d.title, "classification": d.classification, "canaries": list(d.canaries), "body": d.body, "yours": w.is_yours("documents", d.id)} for d in w.documents.values()],
-            "requests": [{"id": r.id, "type": r.type, "document": r.document, "yours": w.is_yours("requests", r.id)} for r in w.requests.values()],
+            "documents": [
+                {
+                    "id": d.id,
+                    "title": d.title,
+                    "classification": d.classification,
+                    "canaries": list(d.canaries),
+                    "body": d.body,
+                    "yours": w.is_yours("documents", d.id),
+                }
+                for d in w.documents.values()
+            ],
+            "requests": [
+                {"id": r.id, "type": r.type, "document": r.document, "yours": w.is_yours("requests", r.id)}
+                for r in w.requests.values()
+            ],
             "classifications": w.classifications(),
             "request_types": w.request_types(),
             "request_prefixes": dict(w.company.get("request_prefixes", {})),
@@ -367,7 +495,13 @@ class App:
         sid = sid if isinstance(sid, str) and CUSTOM_ID.match(sid) else next_id(raws, world)
         raw, problems = clean_form(body.get("form"), sid)
         if problems:
-            return {"id": sid, "problems": problems, "warnings": [], "coverage": None, "toml": dump([raw]) if raw else ""}
+            return {
+                "id": sid,
+                "problems": problems,
+                "warnings": [],
+                "coverage": None,
+                "toml": dump([raw]) if raw else "",
+            }
         return {"id": sid, **check_scenario(world, raw), "toml": dump([raw])}
 
     def save(self, body: dict) -> dict:
@@ -412,7 +546,9 @@ class App:
         repeats = body.get("repeats", 1)
         if isinstance(repeats, bool) or not isinstance(repeats, int) or not 1 <= repeats <= 10:
             raise ApiError(400, "Repeats is a whole number from 1 to 10.")
-        overrides = {k: body[k] for k in ("model", "effort", "monitor_model", "monitor_effort") if body.get(k) is not None}
+        overrides = {
+            k: body[k] for k in ("model", "effort", "monitor_model", "monitor_effort") if body.get(k) is not None
+        }
         settings, problems = parse_settings(overrides, load_settings())
         if problems:
             raise ApiError(400, "Some model choices are not valid.", fields=problems)
@@ -421,7 +557,10 @@ class App:
     def estimate(self, body: dict) -> dict:
         world = self.full_world()
         ids, conditions, repeats, settings = self._run_inputs(body, world)
-        return estimate_cost(world, ids, conditions, settings.model, settings.monitor_model, repeats) | {"max_cost": settings.max_cost, "keys": self.keys_needed(settings, conditions)}
+        return estimate_cost(world, ids, conditions, settings.model, settings.monitor_model, repeats) | {
+            "max_cost": settings.max_cost,
+            "keys": self.keys_needed(settings, conditions),
+        }
 
     def start_run(self, body: dict) -> dict:
         world = self.full_world()
@@ -429,7 +568,7 @@ class App:
         mode = body.get("mode")
         if mode not in ("dry", "claude"):  # "claude": any real model, whichever its provider
             raise ApiError(400, "Choose the scripted assistant (free) or a real model.")
-        keys = None
+        keys: dict[str, str | None] | None = None
         if mode == "claude":
             if body.get("confirm_spend") is not True:
                 raise ApiError(400, "A run with a real model costs money, so it needs your confirmation first.")
@@ -437,15 +576,34 @@ class App:
             for k in self.keys_needed(settings, conditions):
                 if not k["present"]:
                     roles = " and ".join(k["roles"])
-                    raise ApiError(400, f"Add your {k['name']} API key first, in Settings: the {roles} model{'s run' if len(k['roles']) > 1 else ' runs'} on the {k['api']}.", missing_key=k["provider"])
+                    raise ApiError(
+                        400,
+                        f"Add your {k['name']} API key first, in Settings: the {roles} "
+                        f"model{'s run' if len(k['roles']) > 1 else ' runs'} on the {k['api']}.",
+                        missing_key=k["provider"],
+                    )
                 keys[k["provider"]] = resolve_key(k["provider"])[0]
         label = "-".join(ids) if len(ids) <= 3 else f"{len(ids)}-scenarios"
         with self.lock:
             if self.current and self.current.status == "running":
-                raise ApiError(409, f"Run {self.current.name} is still going. Wait for it, or stop it.", current=self.current.name)
+                raise ApiError(
+                    409, f"Run {self.current.name} is still going. Wait for it, or stop it.", current=self.current.name
+                )
             try:
                 with self.custom_lock:  # the run copies your scenarios and additions as they are now
-                    plan = plan_run(scenario_ids=ids, conditions=conditions, repeats=repeats, settings=settings, dry_run=mode == "dry", data_dir=self.data_dir, custom=self.custom, custom_world=self.custom_world, api_keys=keys, label=label, results=self.results)
+                    plan = plan_run(
+                        scenario_ids=ids,
+                        conditions=conditions,
+                        repeats=repeats,
+                        settings=settings,
+                        dry_run=mode == "dry",
+                        data_dir=self.data_dir,
+                        custom=self.custom,
+                        custom_world=self.custom_world,
+                        api_keys=keys,
+                        label=label,
+                        results=self.results,
+                    )
             except RunError as exc:
                 raise ApiError(400, str(exc)) from None
             run = LiveRun(plan, dry_run=mode == "dry")
@@ -473,11 +631,18 @@ class App:
 
     def runs(self, body: dict) -> dict:
         current = self.current
-        return {"runs": list_runs(self.results), "current": {"name": current.name, "status": current.status} if current else None}
+        return {
+            "runs": list_runs(self.results),
+            "current": {"name": current.name, "status": current.status} if current else None,
+        }
 
     def run_folder(self, name: str) -> Path:
         folder = self.results / name
-        if not RUN_NAME.match(name) or not (folder / "config.json").is_file() or folder.resolve().parent != self.results.resolve():
+        if (
+            not RUN_NAME.match(name)
+            or not (folder / "config.json").is_file()
+            or folder.resolve().parent != self.results.resolve()
+        ):
             raise ApiError(404, "There is no run with that name.")
         return folder
 
@@ -509,12 +674,21 @@ class App:
             events = list(episode.events)
             turns = [e for e in events if e["event"] == "turn_start"]
             actions = [e for e in events if e["event"] == "tool_call"]
-            return row | {"state": "running", "message": len(turns), "messages": len(world.scenarios[sid].turns), "actions": len(actions)}
+            return row | {
+                "state": "running",
+                "message": len(turns),
+                "messages": len(world.scenarios[sid].turns),
+                "actions": len(actions),
+            }
         return row | {"state": "waiting"}
 
     def run_view(self, body: dict, name: str) -> dict:
         folder = self.run_folder(name)
-        run = self.current if self.current and self.current.name == name and self.current.plan.out.resolve() == folder.resolve() else None
+        run = (
+            self.current
+            if self.current and self.current.name == name and self.current.plan.out.resolve() == folder.resolve()
+            else None
+        )
         if run:
             config, world = run.plan.config, run.plan.world
         else:
@@ -529,7 +703,16 @@ class App:
             "stopping": bool(run and run.stop.is_set() and run.status == "running"),
             "config": {k: v for k, v in config.items() if k != "data_dir"},
             "conditions": {c: CONDITIONS[c] for c in config.get("conditions", [])},
-            "scenarios": {s: {"title": world.scenarios[s].title, "kind": world.scenarios[s].kind, "trap": world.scenarios[s].trap, "custom": world.scenarios[s].custom} for s in config.get("scenarios", []) if s in world.scenarios},
+            "scenarios": {
+                s: {
+                    "title": world.scenarios[s].title,
+                    "kind": world.scenarios[s].kind,
+                    "trap": world.scenarios[s].trap,
+                    "custom": world.scenarios[s].custom,
+                }
+                for s in config.get("scenarios", [])
+                if s in world.scenarios
+            },
             "rows": rows,
             "done": done,
             "spent": round(sum(r.get("cost", 0) for r in rows), 5),
@@ -541,7 +724,11 @@ class App:
     def payload(self, name: str) -> dict:
         """What the run page shows: every finished episode, scored, with its conversation."""
         folder = self.run_folder(name)
-        run = self.current if self.current and self.current.name == name and self.current.plan.out.resolve() == folder.resolve() else None
+        run = (
+            self.current
+            if self.current and self.current.name == name and self.current.plan.out.resolve() == folder.resolve()
+            else None
+        )
         if run:
             config, world = run.plan.config, run.plan.world
         else:
@@ -584,10 +771,20 @@ def make_handler(app: App) -> type[BaseHTTPRequestHandler]:
 
         def _json(self, status: int, payload: dict) -> None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self._send(status, data, "application/json; charset=utf-8", [("Content-Security-Policy", API_CSP), ("X-Frame-Options", "DENY")])
+            self._send(
+                status,
+                data,
+                "application/json; charset=utf-8",
+                [("Content-Security-Policy", API_CSP), ("X-Frame-Options", "DENY")],
+            )
 
         def _text(self, status: int, text: str) -> None:
-            self._send(status, text.encode("utf-8"), "text/plain; charset=utf-8", [("Content-Security-Policy", API_CSP), ("X-Frame-Options", "DENY")])
+            self._send(
+                status,
+                text.encode("utf-8"),
+                "text/plain; charset=utf-8",
+                [("Content-Security-Policy", API_CSP), ("X-Frame-Options", "DENY")],
+            )
 
         def _handle(self) -> None:
             if self.headers.get("Host", "") not in app.hosts:
@@ -600,9 +797,18 @@ def make_handler(app: App) -> type[BaseHTTPRequestHandler]:
                 return self._text(405, "Method not allowed.")
             if path == "/":
                 page = (WEB / "app.html").read_text(encoding="utf-8").replace("__TOKEN__", app.token)
-                return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8", [("Content-Security-Policy", APP_CSP), ("X-Frame-Options", "DENY"), ("Cross-Origin-Opener-Policy", "same-origin")])
-            if path.startswith("/static/") and path[len("/static/"):] in STATIC:
-                name = path[len("/static/"):]
+                return self._send(
+                    200,
+                    page.encode("utf-8"),
+                    "text/html; charset=utf-8",
+                    [
+                        ("Content-Security-Policy", APP_CSP),
+                        ("X-Frame-Options", "DENY"),
+                        ("Cross-Origin-Opener-Policy", "same-origin"),
+                    ],
+                )
+            if path.startswith("/static/") and path[len("/static/") :] in STATIC:
+                name = path[len("/static/") :]
                 return self._send(200, (WEB / name).read_bytes(), STATIC[name], [("X-Frame-Options", "DENY")])
             match = re.fullmatch(r"/runs/([^/]+)/?", path)
             if match:
@@ -610,7 +816,12 @@ def make_handler(app: App) -> type[BaseHTTPRequestHandler]:
                     html = app.dashboard_html(match.group(1))
                 except ApiError as exc:
                     return self._text(exc.status, exc.message)
-                return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8", [("Content-Security-Policy", dashboard_csp(html)), ("X-Frame-Options", "SAMEORIGIN")])
+                return self._send(
+                    200,
+                    html.encode("utf-8"),
+                    "text/html; charset=utf-8",
+                    [("Content-Security-Policy", dashboard_csp(html)), ("X-Frame-Options", "SAMEORIGIN")],
+                )
             return self._text(404, "Not found.")
 
         def _api(self, path: str) -> None:
@@ -624,7 +835,7 @@ def make_handler(app: App) -> type[BaseHTTPRequestHandler]:
                 site = self.headers.get("Sec-Fetch-Site")
                 if site is not None and site not in ("same-origin", "none"):
                     return self._json(403, {"error": "Requests from other sites are not allowed."})
-            body: dict = {}
+            body: Any = {}
             if self.command == "POST":
                 if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
                     self.close_connection = True
@@ -664,12 +875,17 @@ def make_server(app: App, port: int = 8765) -> ThreadingHTTPServer:
     return server
 
 
-def serve(*, port: int = 8765, open_browser: bool = True, results: Path | None = None, data_dir: Path = DEFAULT_DATA_DIR) -> int:
+def serve(
+    *, port: int = 8765, open_browser: bool = True, results: Path | None = None, data_dir: Path = DEFAULT_DATA_DIR
+) -> int:
     app = App(results=results, data_dir=data_dir)
     try:
         server = make_server(app, port)
     except OSError as exc:
-        print(f"Cannot listen on 127.0.0.1:{port} ({exc.strerror}). Try another port: python -m authz_pilot app --port {port + 1}")
+        print(
+            f"Cannot listen on 127.0.0.1:{port} ({exc.strerror}). Try another port: python -m authz_pilot app --port "
+            f"{port + 1}"
+        )
         return 1
     url = f"http://127.0.0.1:{app.port}/"
     # Flushed, so the address shows up at once even when the output goes to a log file.
@@ -684,6 +900,8 @@ def serve(*, port: int = 8765, open_browser: bool = True, results: Path | None =
     finally:
         server.server_close()
         if app.current and app.current.status == "running":
-            print(f"Run {app.current.name} was stopped before it finished. Its finished episodes are saved. To finish it:")
+            print(
+                f"Run {app.current.name} was stopped before it finished. Its finished episodes are saved. To finish it:"
+            )
             print("  " + resume_command(app.current.plan))
     return 0

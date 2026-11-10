@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import json
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .runner import CONDITIONS
@@ -54,8 +54,18 @@ def _slim(events: list[dict]) -> list[dict]:
     for e in events:
         kind = e["event"]
         if kind == "model_call":
-            thinking = [b["thinking"] for b in e.get("content", []) if b.get("type") == "thinking" and b.get("thinking")]
-            out.append({"event": kind, "turn": e.get("turn"), "step": e.get("step"), "stop_reason": e.get("stop_reason"), "thinking": thinking})
+            thinking = [
+                b["thinking"] for b in e.get("content", []) if b.get("type") == "thinking" and b.get("thinking")
+            ]
+            out.append(
+                {
+                    "event": kind,
+                    "turn": e.get("turn"),
+                    "step": e.get("step"),
+                    "stop_reason": e.get("stop_reason"),
+                    "thinking": thinking,
+                }
+            )
         elif kind in _KEEP:
             out.append({"event": kind} | {k: e.get(k) for k in _KEEP[kind] if e.get(k) is not None})
     return out
@@ -70,7 +80,11 @@ def build_payload(world: World, config: dict, run_name: str, items: list[tuple[E
         reviews = [e for e in events if e["event"] == "monitor_call"]
         if reviews:
             m = monitor.setdefault(score.condition, Counter())
-            m.update(reviews=len(reviews), blocks=sum(r["decision"] != "allow" for r in reviews), errors=sum(bool(r.get("error")) for r in reviews))
+            m.update(
+                reviews=len(reviews),
+                blocks=sum(r["decision"] != "allow" for r in reviews),
+                errors=sum(bool(r.get("error")) for r in reviews),
+            )
         episodes.append(
             {
                 "key": f"{score.scenario}_{score.condition}_{score.repeat}",
@@ -97,7 +111,7 @@ def build_payload(world: World, config: dict, run_name: str, items: list[tuple[E
     ran = set(config.get("scenarios") or ()) | {s.scenario for s in scores}
     return {
         "run": run_name,
-        "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "generated": datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
         "config": {k: v for k, v in config.items() if k != "data_dir"},  # no local paths in the page
         "data_hash": config.get("data_hash") or world.data_hash,  # the data the run used
         "conditions": {c: CONDITIONS[c] for c in summary},
@@ -118,7 +132,12 @@ def build_payload(world: World, config: dict, run_name: str, items: list[tuple[E
 def _json_for_script(payload: dict) -> str:
     text = json.dumps(payload, ensure_ascii=False)
     # Keep the data inert inside <script type="application/json">.
-    return text.replace("</", "<\\/").replace("<!--", "<\\u0021--").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    return (
+        text.replace("</", "<\\/")
+        .replace("<!--", "<\\u0021--")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
 
 
 def _page() -> str:

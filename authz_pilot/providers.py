@@ -25,12 +25,14 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from typing import TYPE_CHECKING, Any
 
 from .models import (
     REMINDER_NOTE,
     VERDICT_SCHEMA,
     AnthropicAgent,
     AnthropicMonitor,
+    ModelInfo,
     Step,
     Verdict,
     check_models as check_claude_models,
@@ -42,8 +44,12 @@ from .models import (
 )
 from .settings import PROVIDERS
 
+if TYPE_CHECKING:
+    from .runner import Agent, Monitor
+
 BASES = {"openai": "https://api.openai.com/v1", "google": "https://generativelanguage.googleapis.com/v1beta"}
-BASE_ENV = {"openai": "AUTHZ_PILOT_OPENAI_BASE_URL", "google": "AUTHZ_PILOT_GEMINI_BASE_URL"}  # for the mock APIs in tests
+# For the mock APIs in tests.
+BASE_ENV = {"openai": "AUTHZ_PILOT_OPENAI_BASE_URL", "google": "AUTHZ_PILOT_GEMINI_BASE_URL"}
 
 
 def base_url(provider: str) -> str:
@@ -56,10 +62,21 @@ def base_url(provider: str) -> str:
 class ProviderError(Exception):
     """A call that failed for good, after any retries."""
 
-    def __init__(self, provider: str, status: int | None, message: str, *, code: str | None = None, param: str | None = None, request_id: str | None = None):
+    def __init__(
+        self,
+        provider: str,
+        status: int | None,
+        message: str,
+        *,
+        code: str | None = None,
+        param: str | None = None,
+        request_id: str | None = None,
+    ):
         self.provider, self.status, self.code, self.param, self.request_id = provider, status, code, param, request_id
         name = PROVIDERS[provider].name
-        super().__init__(f"{name} API" + (f" {status}" if status else "") + (f" ({code})" if code else "") + f": {message}")
+        super().__init__(
+            f"{name} API" + (f" {status}" if status else "") + (f" ({code})" if code else "") + f": {message}"
+        )
 
 
 # 429s that waiting does not fix: the credit, the spend limit or the quota is used up.
@@ -93,12 +110,27 @@ def _pause(attempt: int, retry_after: str | None) -> float:
     return max(asked, min(60.0, 2.0**attempt)) + random.uniform(0, 1)
 
 
-def call_json(provider: str, method: str, url: str, headers: dict, body: dict | None = None, *, timeout: float = 600, retries: int = 4, sleep=time.sleep) -> tuple[dict, dict]:
+def call_json(
+    provider: str,
+    method: str,
+    url: str,
+    headers: dict,
+    body: dict | None = None,
+    *,
+    timeout: float = 600,
+    retries: int = 4,
+    sleep=time.sleep,
+) -> tuple[dict, dict]:
     """One JSON request, retried on rate limits, server errors and dropped connections, never on
     4xx answers that would only repeat. Returns (body, headers with lower-case names)."""
     data = json.dumps(body).encode("utf-8") if body is not None else None
     for attempt in range(retries + 1):
-        request = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json", "Accept": "application/json", **headers})
+        request = urllib.request.Request(
+            url,
+            data=data,
+            method=method,
+            headers={"Content-Type": "application/json", "Accept": "application/json", **headers},
+        )
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return json.loads(response.read() or b"{}"), {k.lower(): v for k, v in response.headers.items()}
@@ -113,7 +145,9 @@ def call_json(provider: str, method: str, url: str, headers: dict, body: dict | 
             if attempt < retries and _retryable(exc.code, code):
                 sleep(_pause(attempt, got.get("retry-after")))
                 continue
-            raise ProviderError(provider, exc.code, message, code=code, param=param, request_id=got.get("x-request-id")) from None
+            raise ProviderError(
+                provider, exc.code, message, code=code, param=param, request_id=got.get("x-request-id")
+            ) from None
         except (urllib.error.URLError, OSError) as exc:  # no answer at all
             if attempt < retries:
                 sleep(_pause(attempt, None))
@@ -126,7 +160,15 @@ def provider_stop(provider: str, exc: ProviderError, model: str) -> Step:
     """The provider's own monitor ended the conversation. Kept apart from refusals and errors:
     it is a check outside the set-up being tested."""
     details = {"type": "provider_stop", "provider": provider, "code": exc.code, "message": str(exc)}
-    return Step(content=[], blocks=[], stop_reason="provider_stop", stop_details=details, usage={}, model=model, request_id=exc.request_id)
+    return Step(
+        content=[],
+        blocks=[],
+        stop_reason="provider_stop",
+        stop_details=details,
+        usage={},
+        model=model,
+        request_id=exc.request_id,
+    )
 
 
 def _text_blocks(content) -> list[dict]:
@@ -140,7 +182,16 @@ OPENAI_STOP = "misalignment_policy_violation"  # OpenAI's own monitor stopped th
 
 def openai_tools(tools: list[dict]) -> list[dict]:
     # strict is off, as for Claude: the harness checks every tool input itself.
-    return [{"type": "function", "name": t["name"], "description": t.get("description", ""), "parameters": t["input_schema"], "strict": False} for t in tools]
+    return [
+        {
+            "type": "function",
+            "name": t["name"],
+            "description": t.get("description", ""),
+            "parameters": t["input_schema"],
+            "strict": False,
+        }
+        for t in tools
+    ]
 
 
 def openai_input(messages: list[dict]) -> list[dict]:
@@ -155,7 +206,11 @@ def openai_input(messages: list[dict]) -> list[dict]:
             items.append({"role": "developer", "content": content})
         else:
             blocks = _text_blocks(content)
-            items += [{"type": "function_call_output", "call_id": b["tool_use_id"], "output": str(b.get("content", ""))} for b in blocks if b.get("type") == "tool_result"]
+            items += [
+                {"type": "function_call_output", "call_id": b["tool_use_id"], "output": str(b.get("content", ""))}
+                for b in blocks
+                if b.get("type") == "tool_result"
+            ]
             texts = [b["text"] for b in blocks if b.get("type") == "text"]
             if texts:
                 items.append({"role": "user", "content": "\n\n".join(texts)})
@@ -209,29 +264,60 @@ def openai_step(data: dict, model: str, request_id: str | None) -> Step:
         stop = "tool_use"
     else:
         stop = "end_turn"
-    return Step(content=items, blocks=blocks, stop_reason=stop, stop_details=details, usage=openai_usage(data.get("usage")), model=data.get("model") or model, request_id=request_id)
+    return Step(
+        content=items,
+        blocks=blocks,
+        stop_reason=stop,
+        stop_details=details,
+        usage=openai_usage(data.get("usage")),
+        model=data.get("model") or model,
+        request_id=request_id,
+    )
+
+
+def _known(model: str) -> ModelInfo:
+    """A model's details. make_agent and make_monitor pick these classes only for a model in MODEL_INFO."""
+    info = model_info(model)
+    if info is None:
+        raise ValueError(f"unknown model {model!r}: it has no entry in MODEL_INFO")
+    return info
 
 
 class _OpenAI:
     def __init__(self, model: str, effort: str, max_tokens: int, api_key: str | None, call=call_json):
         self.model, self.effort, self.max_tokens = model, effort, max_tokens
-        self.info = model_info(model)
+        self.info = _known(model)
         self.key = api_key
         self.call = call
 
     def _post(self, body: dict) -> tuple[dict, dict]:
-        data, headers = self.call("openai", "POST", base_url("openai") + "/responses", {"Authorization": f"Bearer {self.key}"}, body, timeout=600)
+        data, headers = self.call(
+            "openai",
+            "POST",
+            base_url("openai") + "/responses",
+            {"Authorization": f"Bearer {self.key}"},
+            body,
+            timeout=600,
+        )
         err = data.get("error") if isinstance(data.get("error"), dict) else None
         if err or data.get("status") == "failed":
             err = err or {}
-            raise ProviderError("openai", None, str(err.get("message") or "the response failed"), code=err.get("code"), request_id=headers.get("x-request-id"))
+            raise ProviderError(
+                "openai",
+                None,
+                str(err.get("message") or "the response failed"),
+                code=err.get("code"),
+                request_id=headers.get("x-request-id"),
+            )
         return data, headers
 
 
 class OpenAIAgent(_OpenAI):
     """The assistant under test on the Responses API."""
 
-    def __init__(self, model: str, effort: str = "medium", max_tokens: int = 32000, api_key: str | None = None, call=call_json):
+    def __init__(
+        self, model: str, effort: str = "medium", max_tokens: int = 32000, api_key: str | None = None, call=call_json
+    ):
         super().__init__(model, effort, max_tokens, api_key, call)
         self.notices = "developer"
         self.summaries = True  # reasoning summaries for the logs, unless the organization may not have them
@@ -240,8 +326,16 @@ class OpenAIAgent(_OpenAI):
         reasoning = {"effort": effort_for(self.info, self.effort)}
         if self.summaries:
             reasoning["summary"] = "auto"
-        return {"model": self.model, "instructions": system, "input": openai_input(messages), "tools": openai_tools(tools),
-                "tool_choice": "auto", "reasoning": reasoning, "store": False, "max_output_tokens": self.max_tokens}
+        return {
+            "model": self.model,
+            "instructions": system,
+            "input": openai_input(messages),
+            "tools": openai_tools(tools),
+            "tool_choice": "auto",
+            "reasoning": reasoning,
+            "store": False,
+            "max_output_tokens": self.max_tokens,
+        }
 
     def respond(self, system: str, tools: list[dict], messages: list[dict]) -> Step:
         try:
@@ -249,7 +343,11 @@ class OpenAIAgent(_OpenAI):
                 data, headers = self._post(self.request(system, tools, messages))
             except ProviderError as exc:
                 # Summaries can need a verified organization. Without one, carry on without them.
-                if not (self.summaries and exc.status == 400 and (exc.param == "reasoning.summary" or "reasoning.summary" in str(exc))):
+                if not (
+                    self.summaries
+                    and exc.status == 400
+                    and (exc.param == "reasoning.summary" or "reasoning.summary" in str(exc))
+                ):
                     raise
                 self.summaries = False
                 data, headers = self._post(self.request(system, tools, messages))
@@ -263,14 +361,21 @@ class OpenAIAgent(_OpenAI):
 class OpenAIMonitor(_OpenAI):
     """Reviews one proposed action; the answer is JSON that must match the verdict schema."""
 
-    def __init__(self, model: str, effort: str = "medium", max_tokens: int = 16000, api_key: str | None = None, call=call_json):
+    def __init__(
+        self, model: str, effort: str = "medium", max_tokens: int = 16000, api_key: str | None = None, call=call_json
+    ):
         super().__init__(model, effort, max_tokens, api_key, call)
 
     def request(self, system: str, prompt: str) -> dict:
-        return {"model": self.model, "instructions": system, "input": [{"role": "user", "content": prompt}],
-                "reasoning": {"effort": effort_for(self.info, self.effort)},
-                "text": {"format": {"type": "json_schema", "name": "verdict", "schema": VERDICT_SCHEMA, "strict": True}},
-                "store": False, "max_output_tokens": self.max_tokens}
+        return {
+            "model": self.model,
+            "instructions": system,
+            "input": [{"role": "user", "content": prompt}],
+            "reasoning": {"effort": effort_for(self.info, self.effort)},
+            "text": {"format": {"type": "json_schema", "name": "verdict", "schema": VERDICT_SCHEMA, "strict": True}},
+            "store": False,
+            "max_output_tokens": self.max_tokens,
+        }
 
     def review(self, system: str, prompt: str, request: dict | None = None) -> Verdict:
         try:
@@ -278,9 +383,15 @@ class OpenAIMonitor(_OpenAI):
         except ProviderError as exc:
             if exc.code != OPENAI_STOP:
                 raise
-            return Verdict("block", "OpenAI stopped the review, so the action was blocked.", model=self.model, request_id=exc.request_id, error=f"provider_stop: {exc}")
+            return Verdict(
+                "block",
+                "OpenAI stopped the review, so the action was blocked.",
+                model=self.model,
+                request_id=exc.request_id,
+                error=f"provider_stop: {exc}",
+            )
         step = openai_step(data, self.model, headers.get("x-request-id"))
-        meta = {"usage": step.usage, "model": step.model, "request_id": step.request_id}
+        meta: dict[str, Any] = {"usage": step.usage, "model": step.model, "request_id": step.request_id}
         if step.stop_reason == "refusal":
             return Verdict("block", "The monitor model declined to review this action.", error="refusal", **meta)
         if step.stop_reason != "end_turn":
@@ -323,7 +434,10 @@ def gemini_contents(messages: list[dict]) -> list[dict]:
         for b in blocks:
             if b.get("type") == "tool_result":
                 call = calls.get(b["tool_use_id"], {})
-                response = {"name": call.get("name", ""), "response": {"error" if b.get("is_error") else "result": str(b.get("content", ""))}}
+                response = {
+                    "name": call.get("name", ""),
+                    "response": {"error" if b.get("is_error") else "result": str(b.get("content", ""))},
+                }
                 if call.get("api_id"):
                     response["id"] = call["api_id"]
                 parts.append({"functionResponse": response})
@@ -342,7 +456,8 @@ def gemini_usage(usage: dict | None) -> dict:
     u = usage or {}
     cached = int(u.get("cachedContentTokenCount") or 0)
     return {
-        "input_tokens": max(0, int(u.get("promptTokenCount") or 0) - cached) + int(u.get("toolUsePromptTokenCount") or 0),
+        "input_tokens": max(0, int(u.get("promptTokenCount") or 0) - cached)
+        + int(u.get("toolUsePromptTokenCount") or 0),
         "output_tokens": int(u.get("candidatesTokenCount") or 0) + int(u.get("thoughtsTokenCount") or 0),
         "cache_creation_input_tokens": 0,  # implicit caching has no write charge
         "cache_read_input_tokens": cached,
@@ -350,11 +465,23 @@ def gemini_usage(usage: dict | None) -> dict:
 
 
 def gemini_step(data: dict, model: str) -> Step:
-    usage, rid, version = gemini_usage(data.get("usageMetadata")), data.get("responseId"), data.get("modelVersion") or model
+    usage, rid, version = (
+        gemini_usage(data.get("usageMetadata")),
+        data.get("responseId"),
+        data.get("modelVersion") or model,
+    )
     candidates = data.get("candidates") or []
     if not candidates:  # the prompt itself was blocked
         reason = (data.get("promptFeedback") or {}).get("blockReason") or "no answer"
-        return Step(content=[], blocks=[], stop_reason="refusal", stop_details={"type": "blocked", "reason": reason}, usage=usage, model=version, request_id=rid)
+        return Step(
+            content=[],
+            blocks=[],
+            stop_reason="refusal",
+            stop_details={"type": "blocked", "reason": reason},
+            usage=usage,
+            model=version,
+            request_id=rid,
+        )
     candidate = candidates[0]
     content = candidate.get("content") or {}
     parts = content.get("parts") or []
@@ -366,7 +493,9 @@ def gemini_step(data: dict, model: str) -> Step:
             api_id = fc.get("id")
             tool_id = api_id or "call_" + uuid.uuid4().hex[:16]  # the API may leave the id out
             calls[tool_id] = {"name": fc.get("name", ""), "api_id": api_id}
-            blocks.append({"type": "tool_use", "id": tool_id, "name": fc.get("name", ""), "input": fc.get("args") or {}})
+            blocks.append(
+                {"type": "tool_use", "id": tool_id, "name": fc.get("name", ""), "input": fc.get("args") or {}}
+            )
         elif p.get("thought"):
             if p.get("text"):
                 blocks.append({"type": "thinking", "thinking": p["text"]})
@@ -384,23 +513,32 @@ def gemini_step(data: dict, model: str) -> Step:
         stop, details = finish.lower(), {"type": "finish_reason", "reason": finish}
     # The turn goes back unchanged, signatures and all; the ids let tool results name their call.
     turn = [{"type": "gemini", "content": content, "calls": calls}] if parts else []
-    return Step(content=turn, blocks=blocks, stop_reason=stop, stop_details=details, usage=usage, model=version, request_id=rid)
+    return Step(
+        content=turn, blocks=blocks, stop_reason=stop, stop_details=details, usage=usage, model=version, request_id=rid
+    )
 
 
 class _Gemini:
     def __init__(self, model: str, effort: str, max_tokens: int, api_key: str | None, call=call_json):
         self.model, self.effort, self.max_tokens = model, effort, max_tokens
-        self.info = model_info(model)
+        self.info = _known(model)
         self.key = api_key
         self.call = call
 
     def _post(self, body: dict) -> dict:
         # The key goes in a header, never in the URL, so it stays out of logs.
-        data, _ = self.call("google", "POST", f"{base_url('google')}/models/{self.model}:generateContent", {"x-goog-api-key": self.key or ""}, body, timeout=900)
+        data, _ = self.call(
+            "google",
+            "POST",
+            f"{base_url('google')}/models/{self.model}:generateContent",
+            {"x-goog-api-key": self.key or ""},
+            body,
+            timeout=900,
+        )
         return data
 
     def _thinking(self, include: bool) -> dict:
-        config = {"thinkingLevel": THINKING_LEVEL[effort_for(self.info, self.effort)]}
+        config: dict[str, Any] = {"thinkingLevel": THINKING_LEVEL[effort_for(self.info, self.effort)]}
         if include:
             config["includeThoughts"] = True
         return config
@@ -410,16 +548,20 @@ class GeminiAgent(_Gemini):
     """The assistant under test on generateContent. Gemini has no system messages in the middle of
     a conversation, so operator notices go inside the user turn, as for older Claude models."""
 
-    def __init__(self, model: str, effort: str = "medium", max_tokens: int = 32768, api_key: str | None = None, call=call_json):
+    def __init__(
+        self, model: str, effort: str = "medium", max_tokens: int = 32768, api_key: str | None = None, call=call_json
+    ):
         super().__init__(model, effort, max_tokens, api_key, call)
         self.notices = "user_turn"
 
     def request(self, system: str, tools: list[dict], messages: list[dict]) -> dict:
-        return {"systemInstruction": {"parts": [{"text": system + REMINDER_NOTE}]},
-                "contents": gemini_contents(inline_system_messages(messages)),
-                "tools": gemini_tools(tools),
-                "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
-                "generationConfig": {"thinkingConfig": self._thinking(True), "maxOutputTokens": self.max_tokens}}
+        return {
+            "systemInstruction": {"parts": [{"text": system + REMINDER_NOTE}]},
+            "contents": gemini_contents(inline_system_messages(messages)),
+            "tools": gemini_tools(tools),
+            "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
+            "generationConfig": {"thinkingConfig": self._thinking(True), "maxOutputTokens": self.max_tokens},
+        }
 
     def respond(self, system: str, tools: list[dict], messages: list[dict]) -> Step:
         return gemini_step(self._post(self.request(system, tools, messages)), self.model)
@@ -429,32 +571,44 @@ class GeminiMonitor(_Gemini):
     """Reviews one proposed action. The verdict comes as a call to submit_verdict that the
     request forces, because the structured-output fields of generateContent are being renamed."""
 
-    def __init__(self, model: str, effort: str = "medium", max_tokens: int = 16384, api_key: str | None = None, call=call_json):
+    def __init__(
+        self, model: str, effort: str = "medium", max_tokens: int = 16384, api_key: str | None = None, call=call_json
+    ):
         super().__init__(model, effort, max_tokens, api_key, call)
 
     def request(self, system: str, prompt: str) -> dict:
-        tool = {"name": VERDICT_TOOL, "description": "Record the decision on the proposed action.", "parametersJsonSchema": VERDICT_SCHEMA}
-        return {"systemInstruction": {"parts": [{"text": system + f"\n\nGive the answer by calling {VERDICT_TOOL} with these two fields."}]},
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "tools": [{"functionDeclarations": [tool]}],
-                "toolConfig": {"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": [VERDICT_TOOL]}},
-                "generationConfig": {"thinkingConfig": self._thinking(False), "maxOutputTokens": self.max_tokens}}
+        tool = {
+            "name": VERDICT_TOOL,
+            "description": "Record the decision on the proposed action.",
+            "parametersJsonSchema": VERDICT_SCHEMA,
+        }
+        return {
+            "systemInstruction": {
+                "parts": [{"text": system + f"\n\nGive the answer by calling {VERDICT_TOOL} with these two fields."}]
+            },
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "tools": [{"functionDeclarations": [tool]}],
+            "toolConfig": {"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": [VERDICT_TOOL]}},
+            "generationConfig": {"thinkingConfig": self._thinking(False), "maxOutputTokens": self.max_tokens},
+        }
 
     def review(self, system: str, prompt: str, request: dict | None = None) -> Verdict:
         step = gemini_step(self._post(self.request(system, prompt)), self.model)
-        meta = {"usage": step.usage, "model": step.model, "request_id": step.request_id}
+        meta: dict[str, Any] = {"usage": step.usage, "model": step.model, "request_id": step.request_id}
         if step.stop_reason == "refusal":
             return Verdict("block", "The monitor model declined to review this action.", error="refusal", **meta)
         call = next((c for c in step.tool_calls if c["name"] == VERDICT_TOOL), None)
         if call is None:
-            return Verdict("block", "The monitor gave no decision.", error=f"no {VERDICT_TOOL} call ({step.stop_reason})", **meta)
+            return Verdict(
+                "block", "The monitor gave no decision.", error=f"no {VERDICT_TOOL} call ({step.stop_reason})", **meta
+            )
         return parse_verdict(call["input"], meta)
 
 
 # --------------------------------------------------------------------------- choosing and checking
 
 
-def make_agent(model: str, effort: str, keys: dict[str, str | None]):
+def make_agent(model: str, effort: str, keys: dict[str, str | None]) -> Agent:
     provider = provider_of(model)
     if provider == "openai":
         return OpenAIAgent(model, effort, api_key=keys.get("openai"))
@@ -463,7 +617,7 @@ def make_agent(model: str, effort: str, keys: dict[str, str | None]):
     return AnthropicAgent(model, effort=effort, api_key=keys.get("anthropic"))
 
 
-def make_monitor(model: str, effort: str, keys: dict[str, str | None]):
+def make_monitor(model: str, effort: str, keys: dict[str, str | None]) -> Monitor:
     provider = provider_of(model)
     if provider == "openai":
         return OpenAIMonitor(model, effort, api_key=keys.get("openai"))
@@ -479,9 +633,21 @@ def _lookup(provider: str, model: str, key: str, call) -> dict:
     return data
 
 
-def _check_http(provider: str, roles: dict[str, tuple[str, str]], key: str | None, call) -> tuple[list[dict], str | None]:
+def _check_http(
+    provider: str, roles: dict[str, tuple[str, str]], key: str | None, call
+) -> tuple[list[dict], str | None]:
     p = PROVIDERS[provider]
-    rows = [{"role": role, "model": model, "effort": effort, "name": (model_info(model).name if model_info(model) else model), "ok": False, "problems": []} for role, (model, effort) in roles.items()]
+    rows: list[dict[str, Any]] = [
+        {
+            "role": role,
+            "model": model,
+            "effort": effort,
+            "name": (info.name if (info := model_info(model)) else model),
+            "ok": False,
+            "problems": [],
+        }
+        for role, (model, effort) in roles.items()
+    ]
     if not key:
         for row in rows:
             row["problems"].append(f"no {p.name} API key yet: add one above")
@@ -496,13 +662,25 @@ def _check_http(provider: str, roles: dict[str, tuple[str, str]], key: str | Non
                 seen[model] = exc
         found = seen[model]
         if isinstance(found, ProviderError):
-            bad_key = found.status == 401 or found.code in ("API_KEY_INVALID", "invalid_api_key") or (provider == "google" and found.status == 403 and "unregistered" in str(found).lower())
+            bad_key = (
+                found.status == 401
+                or found.code in ("API_KEY_INVALID", "invalid_api_key")
+                or (provider == "google" and found.status == 403 and "unregistered" in str(found).lower())
+            )
             if bad_key:
-                return rows, f"The {p.name} API did not accept this key ({found.status}). Copy it again from {p.console}."
+                return (
+                    rows,
+                    f"The {p.name} API did not accept this key ({found.status}). Copy it again from {p.console}.",
+                )
             if found.status is None:
                 return rows, f"Could not reach the {p.name} API. Check the internet connection."
-            row["problems"].append({403: "this key may not use this model (403)", 404: "the API does not know this model, or this key cannot see it (404)",
-                                    429: "rate limited (429); try again in a minute"}.get(found.status, f"the API answered with an error ({found.status})"))
+            row["problems"].append(
+                {
+                    403: "this key may not use this model (403)",
+                    404: "the API does not know this model, or this key cannot see it (404)",
+                    429: "rate limited (429); try again in a minute",
+                }.get(found.status, f"the API answered with an error ({found.status})")
+            )
             continue
         if provider == "google":
             row["name"] = found.get("displayName") or row["name"]
@@ -515,7 +693,9 @@ def _check_http(provider: str, roles: dict[str, tuple[str, str]], key: str | Non
     return rows, None
 
 
-def check_models(roles: dict[str, tuple[str, str]], keys: dict[str, str | None], *, claude_client=None, call=call_json) -> dict:
+def check_models(
+    roles: dict[str, tuple[str, str]], keys: dict[str, str | None], *, claude_client=None, call=call_json
+) -> dict:
     """Free checks for each provider the chosen models run on: does the key work, and can each
     model do what the harness asks of it? `roles` maps "assistant" and "monitor" to (model, effort)."""
     rows: dict[str, dict] = {}
@@ -524,7 +704,20 @@ def check_models(roles: dict[str, tuple[str, str]], keys: dict[str, str | None],
         mine = {role: v for role, v in roles.items() if provider_of(v[0]) == provider}
         if provider == "anthropic":
             if not keys.get("anthropic") and not os.environ.get("ANTHROPIC_AUTH_TOKEN") and claude_client is None:
-                result = {"error": None, "models": [{"role": r, "model": m, "effort": e, "name": model_info(m).name if model_info(m) else m, "ok": False, "problems": ["no Anthropic API key yet: add one above"]} for r, (m, e) in mine.items()]}
+                result: dict[str, Any] = {
+                    "error": None,
+                    "models": [
+                        {
+                            "role": r,
+                            "model": m,
+                            "effort": e,
+                            "name": info.name if (info := model_info(m)) else m,
+                            "ok": False,
+                            "problems": ["no Anthropic API key yet: add one above"],
+                        }
+                        for r, (m, e) in mine.items()
+                    ],
+                }
             else:
                 result = check_claude_models(mine, api_key=keys.get("anthropic"), client=claude_client)
             got, error = result["models"], result["error"]

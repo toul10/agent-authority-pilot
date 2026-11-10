@@ -6,12 +6,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import anthropic
 import pytest
+from helpers import check_message_rules
 
 from authz_pilot.models import AnthropicAgent, AnthropicMonitor
 from authz_pilot.runner import run_episode
 from authz_pilot.scoring import score_episode
-
-from helpers import check_message_rules
 
 
 def message(content, stop_reason, **extra):
@@ -23,7 +22,12 @@ def message(content, stop_reason, **extra):
         "content": content,
         "stop_reason": stop_reason,
         "stop_sequence": None,
-        "usage": {"input_tokens": 1000, "output_tokens": 100, "cache_creation_input_tokens": 900, "cache_read_input_tokens": 0},
+        "usage": {
+            "input_tokens": 1000,
+            "output_tokens": 100,
+            "cache_creation_input_tokens": 900,
+            "cache_read_input_tokens": 0,
+        },
         **extra,
     }
 
@@ -66,12 +70,30 @@ class MockAPI:
 
 
 def test_agent_and_monitor_roundtrip(world):
-    thinking = {"type": "thinking", "thinking": "Maria may approve discounts per the notice.", "signature": "sig-abc123"}
+    thinking = {
+        "type": "thinking",
+        "thinking": "Maria may approve discounts per the notice.",
+        "signature": "sig-abc123",
+    }
     responses = [
-        message([thinking, {"type": "tool_use", "id": "toolu_01", "name": "approve_request", "input": {"request_id": "DR-12"}}], "tool_use"),
-        message([{"type": "text", "text": '{"decision": "allow", "reason": "Requested and permitted."}'}], "end_turn", model="claude-sonnet-5-5"),
+        message(
+            [
+                thinking,
+                {"type": "tool_use", "id": "toolu_01", "name": "approve_request", "input": {"request_id": "DR-12"}},
+            ],
+            "tool_use",
+        ),
+        message(
+            [{"type": "text", "text": '{"decision": "allow", "reason": "Requested and permitted."}'}],
+            "end_turn",
+            model="claude-sonnet-5-5",
+        ),
         message([{"type": "text", "text": "Approved DR-12."}], "end_turn"),
-        message([{"type": "text", "text": '{"decision": "allow", "reason": "Nothing protected."}'}], "end_turn", model="claude-sonnet-5-5"),
+        message(
+            [{"type": "text", "text": '{"decision": "allow", "reason": "Nothing protected."}'}],
+            "end_turn",
+            model="claude-sonnet-5-5",
+        ),
     ]
     with MockAPI(responses) as api:
         agent = AnthropicAgent(client=api.client)
@@ -85,7 +107,13 @@ def test_agent_and_monitor_roundtrip(world):
     assert first["output_config"] == {"effort": "medium"}
     assert first["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert first["cache_control"] == {"type": "ephemeral"}
-    assert [t["name"] for t in first["tools"]] == ["list_documents", "read_document", "send_email", "approve_request", "escalate_to_human"]
+    assert [t["name"] for t in first["tools"]] == [
+        "list_documents",
+        "read_document",
+        "send_email",
+        "approve_request",
+        "escalate_to_human",
+    ]
     assert "temperature" not in first and "tool_choice" not in first
     assert first["messages"][1]["role"] == "system" and first["messages"][1]["content"].startswith("Operator notice:")
     check_message_rules(first["messages"])
@@ -97,7 +125,9 @@ def test_agent_and_monitor_roundtrip(world):
     # The assistant's turn goes back unchanged, thinking signature included.
     assistant = second["messages"][2]
     assert assistant["role"] == "assistant" and assistant["content"][0]["signature"] == "sig-abc123"
-    assert second["messages"][3]["content"] == [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "Request DR-12 approved."}]
+    assert second["messages"][3]["content"] == [
+        {"type": "tool_result", "tool_use_id": "toolu_01", "content": "Request DR-12 approved."}
+    ]
     check_message_rules(second["messages"])
 
     call = next(e for e in events if e["event"] == "model_call")
@@ -123,12 +153,19 @@ def test_refusal_is_recorded(world):
 @pytest.mark.parametrize("text", ["not json", '{"decision": "maybe", "reason": "?"}'])
 def test_unreadable_monitor_answer_blocks(world, text):
     responses = [
-        message([{"type": "tool_use", "id": "toolu_01", "name": "approve_request", "input": {"request_id": "DR-12"}}], "tool_use"),
+        message(
+            [{"type": "tool_use", "id": "toolu_01", "name": "approve_request", "input": {"request_id": "DR-12"}}],
+            "tool_use",
+        ),
         message([{"type": "text", "text": text}], "end_turn", model="claude-sonnet-5-5"),
         message([{"type": "text", "text": "The approval was blocked."}], "end_turn"),
-        message([{"type": "text", "text": '{"decision": "allow", "reason": "ok"}'}], "end_turn", model="claude-sonnet-5-5"),
+        message(
+            [{"type": "text", "text": '{"decision": "allow", "reason": "ok"}'}], "end_turn", model="claude-sonnet-5-5"
+        ),
     ]
     with MockAPI(responses) as api:
-        events = run_episode(world, world.scenarios["L04"], "C", AnthropicAgent(client=api.client), AnthropicMonitor(client=api.client))
+        events = run_episode(
+            world, world.scenarios["L04"], "C", AnthropicAgent(client=api.client), AnthropicMonitor(client=api.client)
+        )
     call = next(e for e in events if e["event"] == "tool_call")
     assert call["status"] == "blocked" and call["blocked_by"] == "monitor"

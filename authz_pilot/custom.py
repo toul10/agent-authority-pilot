@@ -13,9 +13,19 @@ import tempfile
 import tomllib
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from .checks import scripted_checks
-from .world import BAIT_TYPES, EXPECT_TYPES, TRAP_TYPES, CustomScenarioError, World, _scenario, normalize_request_id, validate
+from .world import (
+    BAIT_TYPES,
+    EXPECT_TYPES,
+    TRAP_TYPES,
+    CustomScenarioError,
+    World,
+    _scenario,
+    normalize_request_id,
+    validate,
+)
 
 HEADER = """\
 # Your own scenarios, written in the app (python -m authz_pilot app) or by hand.
@@ -26,7 +36,8 @@ LIMITS = {"title": 120, "description": 600, "message": 4000, "notice": 2000, "bo
 # How many of each one scenario takes. `rights` caps what one grant or revocation lets a person
 # read or approve.
 COUNTS = {"turns": 40, "items": 20, "documents": 10, "canaries": 50, "grants": 20, "rights": 50}
-_UNSAFE = re.compile("[\x00-\x08\x0b-\x1f\x7f\ud800-\udfff]")  # control characters (not tab or newline), DEL, lone surrogates
+# Control characters (not tab or newline), DEL, lone surrogates.
+_UNSAFE = re.compile("[\x00-\x08\x0b-\x1f\x7f\ud800-\udfff]")
 _DOC_ID = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 _BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -230,7 +241,7 @@ def clean_form(form, sid: str) -> tuple[dict, list[str]]:
         doc_id = f.text(d.get("id"), LIMITS["id"], f"{where}, id", required=True).lower()
         if doc_id and not _DOC_ID.match(doc_id):
             f.problems.append(f"{where}, id: use lowercase letters, digits and dashes, like supplier-note.")
-        doc = {
+        doc: dict[str, Any] = {
             "id": doc_id,
             "title": f.text(d.get("title"), LIMITS["title"], f"{where}, title", required=True),
             "classification": f.text(d.get("classification"), 40, f"{where}, classification", required=True),
@@ -280,7 +291,9 @@ def clean_form(form, sid: str) -> tuple[dict, list[str]]:
             for j, g in enumerate(f.items(t.get(key), COUNTS["grants"], f"{where}, {key}"), 1):
                 if not isinstance(g, dict):
                     continue
-                entry = {"person": f.text(g.get("person"), 31, f"{where}, {key} {j}, person", required=True)}
+                entry: dict[str, Any] = {
+                    "person": f.text(g.get("person"), 31, f"{where}, {key} {j}, person", required=True)
+                }
                 for right in ("read", "approve"):
                     values = f.words(g.get(right), COUNTS["rights"], f"{where}, {key} {j}, {right}")
                     if values:
@@ -337,4 +350,8 @@ def check_scenario(world: World, raw: dict) -> dict:
     if problems:
         return {"problems": problems, "warnings": [], "coverage": None}
     warnings, coverage = scripted_checks(with_it, ids=[sid])
-    return {"problems": [], "warnings": [_friendly(w, sid) for w in warnings], "coverage": coverage[0] if coverage else None}
+    return {
+        "problems": [],
+        "warnings": [_friendly(w, sid) for w in warnings],
+        "coverage": coverage[0] if coverage else None,
+    }

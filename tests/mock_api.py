@@ -11,6 +11,7 @@ Tests start it in a thread. To try the app or the CLI without a real key:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import re
 import threading
@@ -19,7 +20,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 MOCK_KEY = "sk-ant-mock-0000000000000000"
 
 CAPABLE = {
-    "effort": {"supported": True, **{level: {"supported": True} for level in ("low", "medium", "high", "xhigh", "max")}},
+    "effort": {
+        "supported": True,
+        **{level: {"supported": True} for level in ("low", "medium", "high", "xhigh", "max")},
+    },
     "thinking": {"supported": True, "types": {"adaptive": {"supported": True}, "enabled": {"supported": False}}},
     "structured_outputs": {"supported": True},
 }
@@ -41,15 +45,28 @@ NAMES = {
 
 # What the real API is documented to reject, written down here on its own (not read from the
 # app's model table), so a test fails if the app sends a model something it does not take.
-SYSTEM_MESSAGES = {"claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-sonnet-5-5"}
+SYSTEM_MESSAGES = {
+    "claude-fable-5-1",
+    "claude-fable-5",
+    "claude-opus-5-5",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-sonnet-5-5",
+}
 BUDGET_ONLY = {"claude-opus-4-5", "claude-haiku-4-5"}  # manual extended thinking, no effort
 NO_XHIGH = {"claude-opus-4-6", "claude-sonnet-4-6"}
 
 
 def capabilities_of(model_id: str) -> dict:
     if model_id in BUDGET_ONLY:
-        return {"effort": {"supported": False}, "structured_outputs": {"supported": True},
-                "thinking": {"supported": True, "types": {"adaptive": {"supported": False}, "enabled": {"supported": True}}}}
+        return {
+            "effort": {"supported": False},
+            "structured_outputs": {"supported": True},
+            "thinking": {
+                "supported": True,
+                "types": {"adaptive": {"supported": False}, "enabled": {"supported": True}},
+            },
+        }
     if model_id in NO_XHIGH:
         return {**CAPABLE, "effort": {**CAPABLE["effort"], "xhigh": {"supported": False}}}
     return CAPABLE
@@ -99,7 +116,12 @@ def message(content: list, stop_reason: str, model: str = "claude-opus-5-5") -> 
         "content": content,
         "stop_reason": stop_reason,
         "stop_sequence": None,
-        "usage": {"input_tokens": 1200, "output_tokens": 80, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+        "usage": {
+            "input_tokens": 1200,
+            "output_tokens": 80,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        },
     }
 
 
@@ -107,7 +129,7 @@ def sent_key(headers: dict) -> str | None:
     """The API key a request carried: SDK 2.x sends it as a bearer token, older clients as x-api-key."""
     lowered = {k.lower(): v for k, v in headers.items()}
     auth = lowered.get("authorization", "")
-    return auth[len("Bearer "):] if auth.startswith("Bearer ") else lowered.get("x-api-key")
+    return auth[len("Bearer ") :] if auth.startswith("Bearer ") else lowered.get("x-api-key")
 
 
 def default_reply(body: dict) -> dict:
@@ -121,7 +143,15 @@ def default_reply(body: dict) -> dict:
 
 
 class MockAPI:
-    def __init__(self, *, key: str | None = MOCK_KEY, responses: list | None = None, models: dict | None = None, port: int = 0, strict: bool = True):
+    def __init__(
+        self,
+        *,
+        key: str | None = MOCK_KEY,
+        responses: list | None = None,
+        models: dict | None = None,
+        port: int = 0,
+        strict: bool = True,
+    ):
         self.key = key
         self.strict = strict  # answer 400 to requests the real API is documented to reject
         self.responses = list(responses or [])
@@ -159,7 +189,9 @@ class MockAPI:
             def do_POST(self):
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length) or b"{}")
-                outer.requests.append({"method": "POST", "path": self.path, "body": body, "headers": dict(self.headers)})
+                outer.requests.append(
+                    {"method": "POST", "path": self.path, "body": body, "headers": dict(self.headers)}
+                )
                 if not self._authorised():
                     return self._error(401, "authentication_error", "invalid API key")
                 if self.path.split("?")[0] != "/v1/messages":
@@ -195,7 +227,5 @@ if __name__ == "__main__":
     port = parser.parse_args().port
     with MockAPI(port=port) as api:
         print(f"Mock Claude API on {api.url} (key {MOCK_KEY}). Ctrl-C stops it.")
-        try:
+        with contextlib.suppress(KeyboardInterrupt):
             api.thread.join()
-        except KeyboardInterrupt:
-            pass

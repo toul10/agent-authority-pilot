@@ -1,9 +1,11 @@
+from itertools import pairwise
+
+from helpers import check_message_rules
+
 from authz_pilot.runner import Episode, episode_path, read_events, run_batch, run_episode
 from authz_pilot.scripted import PlannedAgent, ScriptedAgent, ScriptedMonitor, scripted_step, text_block, tool_block
 from authz_pilot.tools import ACTION_NOTES, TOOL_NAMES, Toolbox
 from authz_pilot.world import Permissions
-
-from helpers import check_message_rules
 
 
 def every_call(agent):
@@ -15,7 +17,9 @@ def test_notice_is_a_system_message_after_the_user_message(world):
     run_episode(world, world.scenarios["L12"], "B", agent)
     first = agent.seen[0]
     assert first[0]["role"] == "user"
-    assert first[0]["content"][-1]["text"].startswith("[Authenticated sender: Maria Ostrander <maria@ottermere.example>, Sales]")
+    assert first[0]["content"][-1]["text"].startswith(
+        "[Authenticated sender: Maria Ostrander <maria@ottermere.example>, Sales]"
+    )
     assert first[1] == {"role": "system", "content": "Operator notice: " + world.scenarios["L12"].turns[0].notice}
     for messages in agent.seen:
         check_message_rules(messages)
@@ -23,13 +27,15 @@ def test_notice_is_a_system_message_after_the_user_message(world):
 
 def test_history_is_append_only_across_turns(world):
     sc = world.scenarios["T13"]
-    agent = ScriptedAgent([
-        [tool_block("t1", "approve_request", request_id="DR-12")],
-        [text_block("Approved DR-12.")],
-        [text_block("I can't approve DR-17 any more.")],
-    ])
+    agent = ScriptedAgent(
+        [
+            [tool_block("t1", "approve_request", request_id="DR-12")],
+            [text_block("Approved DR-12.")],
+            [text_block("I can't approve DR-17 any more.")],
+        ]
+    )
     run_episode(world, sc, "A", agent)
-    for before, after in zip(agent.seen, agent.seen[1:]):
+    for before, after in pairwise(agent.seen):
         assert after[: len(before)] == before  # nothing earlier is ever edited
     roles = [m["role"] for m in agent.seen[-1]]
     assert roles == ["user", "system", "assistant", "user", "assistant", "user", "system"]
@@ -38,10 +44,15 @@ def test_history_is_append_only_across_turns(world):
 
 
 def test_parallel_tool_calls_are_answered_in_one_message(world):
-    agent = ScriptedAgent([
-        [tool_block("t1", "read_document", document_id="price-list"), tool_block("t2", "read_document", document_id="supplier-newsletter")],
-        [text_block("€24.90; new crop from mid-November.")],
-    ])
+    agent = ScriptedAgent(
+        [
+            [
+                tool_block("t1", "read_document", document_id="price-list"),
+                tool_block("t2", "read_document", document_id="supplier-newsletter"),
+            ],
+            [text_block("€24.90; new crop from mid-November.")],
+        ]
+    )
     run_episode(world, world.scenarios["L03"], "A", agent)
     results = agent.seen[1][-1]["content"]
     assert [b["tool_use_id"] for b in results] == ["t1", "t2"]
@@ -49,7 +60,9 @@ def test_parallel_tool_calls_are_answered_in_one_message(world):
 
 
 def test_code_check_denial_is_returned_as_an_error(world):
-    agent = ScriptedAgent([[tool_block("t1", "read_document", document_id="margin-sheet")], [text_block("I can't share that.")]])
+    agent = ScriptedAgent(
+        [[tool_block("t1", "read_document", document_id="margin-sheet")], [text_block("I can't share that.")]]
+    )
     events = run_episode(world, world.scenarios["T06"], "B", agent)
     result = agent.seen[1][-1]["content"][0]
     assert result["is_error"] is True and "may not see finance documents" in result["content"]
@@ -76,7 +89,7 @@ def test_the_action_notes_match_the_code_checks(world):
 
 def test_step_limit_carries_unanswered_calls_into_the_next_turn(world):
     looping = [[tool_block(f"t{i}", "list_documents")] for i in range(1, 4)]
-    agent = ScriptedAgent(looping + [[text_block("ok")]])
+    agent = ScriptedAgent([*looping, [text_block("ok")]])
     events = run_episode(world, world.scenarios["L14"], "A", agent, max_steps=2)
     ends = [e for e in events if e["event"] == "turn_end"]
     assert ends[0]["outcome"] == "step_limit"
@@ -120,7 +133,13 @@ def test_monitor_sees_state_conversation_and_action(world):
         return original(system, prompt, request)
 
     monitor.review = spy
-    agent = ScriptedAgent([[tool_block("t1", "read_document", document_id="margin-sheet")], [text_block("€13.85")], [text_block("Ask finance.")]])
+    agent = ScriptedAgent(
+        [
+            [tool_block("t1", "read_document", document_id="margin-sheet")],
+            [text_block("€13.85")],
+            [text_block("Ask finance.")],
+        ]
+    )
     run_episode(world, world.scenarios["T09"], "C", agent, monitor)
     last = seen[-1]
     assert "Current requester: Maria Ostrander" in last
@@ -166,8 +185,8 @@ def test_planned_agents_follow_the_message_rules(world):
             calls = []
             original = agent.respond
 
-            def spy(system, tools, messages, _orig=original):
-                calls.append([dict(m) for m in messages])
+            def spy(system, tools, messages, _orig=original, _calls=calls):
+                _calls.append([dict(m) for m in messages])
                 return _orig(system, tools, messages)
 
             agent.respond = spy
