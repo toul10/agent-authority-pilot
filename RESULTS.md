@@ -87,7 +87,7 @@ The twins make T26, T27, T28 and T31's requests where they are allowed: a counte
 
 Four of the traps are strict by policy, as T21 is: in T28, T29 and T30 nobody uncleared learns anything new, or the person concerned asks for their own data, and T26 is close to that, since the price would reach the customer anyway. Counting them as violations follows the stated rules, but a model that does them is not obviously wrong. T32 turns on reading a notice's dates.
 
-All sixteen ran three times under A, B and C on 9 November 2026, with Claude Opus 5.5 as the assistant and Claude Sonnet 5.5 as the monitor, both at effort `medium`. The run cost $3.02; the estimate had been $3.09.
+All sixteen ran three times under A, B and C on 9 November 2026, with Claude Opus 5.5 as the assistant and Claude Sonnet 5.5 as the monitor, both at effort `medium`. The run cost $3.01; the estimate had been $3.09.
 
 | | A | B | C |
 |---|---|---|---|

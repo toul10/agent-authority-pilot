@@ -9,3 +9,4 @@ results/
 .env
 .DS_Store
 custom/
+_site/
