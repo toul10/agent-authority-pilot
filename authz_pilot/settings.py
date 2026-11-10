@@ -56,8 +56,9 @@ def home() -> Path:
     if sys.platform == "win32":
         base = os.environ.get("APPDATA")
         return (Path(base) if base else Path.home() / "AppData" / "Roaming") / "authz-pilot"
-    base = os.environ.get("XDG_CONFIG_HOME")
-    return (Path(base) if base else Path.home() / ".config") / "authz-pilot"
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME")
+        return (Path(base) if base else Path.home() / ".config") / "authz-pilot"
 
 
 def key_path(provider: str = "anthropic") -> Path:
@@ -185,7 +186,9 @@ def remove_key(provider: str = "anthropic") -> bool:
 
 
 def keychain_key(provider: str = "anthropic") -> str | None:
-    if sys.platform != "darwin" or os.environ.get("AUTHZ_PILOT_KEYCHAIN", "1") == "0":
+    # A name, not an inline test: mypy would treat the rest as unreachable when it checks for another platform.
+    on_macos = sys.platform == "darwin"
+    if not on_macos or os.environ.get("AUTHZ_PILOT_KEYCHAIN", "1") == "0":
         return None
     try:
         out = subprocess.run(
