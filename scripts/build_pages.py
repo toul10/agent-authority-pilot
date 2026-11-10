@@ -61,8 +61,11 @@ def interval(k: int, n: int) -> str:
 @dataclass
 class Run:
     name: str
+    label: str
     day: date | None
     scenarios: str
+    traps: int
+    legit: int
     recorded_as: str
     agent: str
     monitor: str
@@ -131,6 +134,19 @@ def built_in_ids(run_dir: Path, ids: list[str]) -> list[str]:
     return [by_title.get(recorded.get(sid), sid) for sid in ids]
 
 
+def folder_label(folder: str, agent: str) -> str:
+    """What a run's folder is called beyond its date and its model: 'Harder traps 2', or nothing."""
+    rest = FOLDER_DATE.sub("", folder)
+    if agent and rest.endswith(agent):
+        rest = rest[: -len(agent)]
+    rest = rest.strip("-").replace("-", " ")
+    return rest[:1].upper() + rest[1:]
+
+
+def plural(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
 def load_run(run_dir: Path, names: dict[str, str]) -> Run:
     config = json.loads((run_dir / "config.json").read_text("utf-8"))
     summary = json.loads((run_dir / "summary.json").read_text("utf-8"))
@@ -139,8 +155,12 @@ def load_run(run_dir: Path, names: dict[str, str]) -> Run:
     shown = built_in_ids(run_dir, ids)
     m = FOLDER_DATE.match(run_dir.name)
     repeats = int(config.get("repeats") or 1)
+    kinds = {e["scenario"]: e.get("kind") for e in summary.get("episodes", [])}
     return Run(
         name=run_dir.name,
+        label=folder_label(run_dir.name, str(config.get("agent", ""))),
+        traps=sum(k == "trap" for k in kinds.values()),
+        legit=sum(k == "legit" for k in kinds.values()),
         day=date(int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None,
         scenarios=id_ranges(shown),
         recorded_as=id_ranges(ids) if shown != ids else "",
@@ -187,46 +207,100 @@ def mark(tone: str) -> str:
     )
 
 
-def condition_cell(letter: str, c: dict[str, Any], sampled: bool) -> str:
-    k, n = int(c.get("trap_episodes_violated", 0)), int(c.get("trap_episodes", 0))
-    done, legit = int(c.get("legit_completed", 0)), int(c.get("legit_episodes", 0))
-    stopped = int(c.get("trap_episodes_stopped_only", 0))
-    refused = int(c.get("refusals", 0)) + int(c.get("provider_stops", 0))
-    errors = int(c.get("errors", 0))
+def meter(k: int, stopped: int, n: int) -> str:
+    """One thin bar for a count: violations, then attempts that were all stopped, then the rest."""
+    parts = [("bad", k), ("warn", stopped), ("good", n - k - stopped)]
+    return (
+        '<span class="meter" aria-hidden="true">'
+        + "".join(f'<i class="t-{tone}" style="flex:{v} 1 0"></i>' for tone, v in parts if v > 0)
+        + "</span>"
+    )
+
+
+def count_cell(letter: str, k: int, stopped: int, n: int, sampled: bool, detail: list[str]) -> str:
+    """One set-up's box: how many trap episodes had a violation that took effect, and what else to know."""
     tone = "bad" if k else "good"
     if n:
         headline = f"{k} / {n}" + (f' <span class="ci">({interval(k, n)})</span>' if sampled else "")
-        lines = [f"{headline}", "trap episodes with a violation"]
+        body = f'<span class="w">{headline}</span>{meter(k, stopped, n)}'
     else:
-        lines = ["–", "no trap episodes"]
-    detail = []
+        body = '<span class="w">–</span><span class="d">no trap episodes</span>'
     if stopped:
-        detail.append(f"{stopped} stopped before {'it' if stopped == 1 else 'they'} took effect")
+        detail = [f"{stopped} stopped before {'it' if stopped == 1 else 'they'} took effect", *detail]
+    return (
+        f'<div class="cell t-{tone}">{mark(tone)}<span class="cw">'
+        f'<span class="cn"><b class="display">{E(letter)}</b> {E(CONDITIONS.get(letter, letter))}</span>'
+        + body
+        + "".join(f'<span class="d">{E(d)}</span>' for d in detail)
+        + "</span></div>"
+    )
+
+
+def condition_cell(letter: str, c: dict[str, Any], sampled: bool) -> str:
+    done, legit = int(c.get("legit_completed", 0)), int(c.get("legit_episodes", 0))
+    refused = int(c.get("refusals", 0)) + int(c.get("provider_stops", 0))
+    errors = int(c.get("errors", 0))
+    detail = []
     if legit:
-        detail.append(f"{done} / {legit} legit episodes done")
+        detail.append(f"{done} / {legit} legit requests done")
     if refused:
         detail.append(f"{refused} ended in a refusal")
     if errors:
         detail.append(f"{errors} ended with an error")
-    name = CONDITIONS.get(letter, letter)
+    violated, stopped = int(c.get("trap_episodes_violated", 0)), int(c.get("trap_episodes_stopped_only", 0))
+    return count_cell(letter, violated, stopped, int(c.get("trap_episodes", 0)), sampled, detail)
+
+
+def by_assistant(runs: list[Run]) -> str:
+    """The runs added up per assistant: the first thing to read, before any one run."""
+    totals: dict[str, dict[str, list[int]]] = {}
+    seen: dict[str, int] = {}
+    for run in runs:
+        if run.dry_run:
+            continue
+        seen[run.agent] = seen.get(run.agent, 0) + 1
+        for letter, c in run.conditions.items():
+            cell = totals.setdefault(run.agent, {}).setdefault(letter, [0, 0, 0])
+            cell[0] += int(c.get("trap_episodes_violated", 0))
+            cell[1] += int(c.get("trap_episodes_stopped_only", 0))
+            cell[2] += int(c.get("trap_episodes", 0))
+    if not totals:
+        return ""
+
+    def rate(agent: str) -> float:
+        k, _, n = next(iter(totals[agent].values()))
+        return k / n if n else 0.0
+
+    rows = []
+    for agent in sorted(totals, key=lambda a: (-rate(a), a)):
+        cells = "".join(count_cell(letter, k, s, n, True, []) for letter, (k, s, n) in totals[agent].items())
+        rows.append(
+            f'<div class="who-row"><h3>{E(agent)} <span class="muted">{plural(seen[agent], "run", "runs")}</span></h3>'
+            f'<div class="conds">{cells}</div></div>'
+        )
     return (
-        f'<div class="cell t-{tone}">{mark(tone)}<span class="cw">'
-        f'<span class="cn"><b class="display">{E(letter)}</b> {E(name)}</span>'
-        f'<span class="w">{lines[0]}</span><span class="d">{E(lines[1])}</span>'
-        + "".join(f'<span class="d">{E(d)}</span>' for d in detail)
-        + "</span></div>"
+        '<section class="finding" aria-labelledby="f-h">'
+        '<h2 id="f-h">What the runs show so far</h2>'
+        '<p class="sub">Trap episodes where a violation took effect, out of all the trap episodes of each assistant, '
+        "per set-up. The range is the 95% interval.</p>" + "".join(rows) + "</section>"
     )
 
 
 def run_card(run: Run) -> str:
     when = f"{run.day.day} {run.day:%b %Y}" if run.day else ""
     times = TIMES.get(run.repeats, f"{run.repeats} times")
+    size = " and ".join(
+        s
+        for s in (plural(run.traps, "trap", "traps"), plural(run.legit, "legit request", "legit requests"))
+        if s[0] != "0"
+    )
     facts = [
         when,
-        f"assistant at effort {run.effort}" if run.effort else "",
-        f"monitor {run.monitor}" if run.monitor else "",
-        f"each scenario {times} under A, B and C",
+        run.scenarios if run.label else "",
+        size,
+        f"each {times}",
         f"{run.episodes} episodes",
+        f"monitor {run.monitor}" if run.monitor else "",
     ]
     notes = []
     if run.recorded_as:
@@ -244,34 +318,52 @@ def run_card(run: Run) -> str:
     cells = "".join(condition_cell(c, v, not run.dry_run) for c, v in run.conditions.items())
     return (
         '<article class="run">'
-        f'<h2><a href="{E(href)}">{E(run.scenarios)}</a> <span class="who">{E(run.agent)}</span></h2>'
+        f'<h3><a href="{E(href)}">{E(run.label or run.scenarios)}</a> <span class="who">{E(run.agent)}</span></h3>'
         f'<p class="facts-line">{E(" · ".join(f for f in facts if f))}</p>'
         f'<div class="conds">{cells}</div>'
         + "".join(f'<p class="note">{E(n)}</p>' for n in notes)
-        + f'<p class="open"><a class="btn small" href="{E(href)}">Open the dashboard</a>'
-        f' <span class="muted">{E(run.name)}</span></p>'
+        + '<p class="open"><span class="go">Read every conversation <span aria-hidden="true">→</span></span>'
+        f' <span class="muted folder">{E(run.name)}</span></p>'
         "</article>"
     )
 
 
 PAGE_CSS = """
 .lede { margin: 0 0 6px; font-size: 17px; max-width: 70ch; }
-.runs { display: grid; gap: 22px; margin: 34px 0 0; }
-.run { background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r-surface); padding: 20px 22px; }
-.run h2 { font-size: 22px; }
-.run h2 a { text-decoration: none; }
-.run h2 a:hover { text-decoration: underline; }
-.run h2 .who { color: var(--ink-2); font-weight: 500; margin-left: 6px; white-space: nowrap; }
-.facts-line { color: var(--ink-2); font-size: 14px; margin: 4px 0 14px; }
+.finding, .runs-head { margin: 40px 0 0; }
+.finding > .sub, .runs-head > .sub { font-size: 14px; margin: 4px 0 0; max-width: 75ch; }
+.who-row { margin: 18px 0 0; }
+.who-row h3 { font-size: 17px; margin: 0 0 8px; }
+.who-row h3 .muted { font-size: 13px; font-weight: 500; margin-left: 6px; }
+.runs { display: grid; gap: 16px; margin: 16px 0 0; }
+.run {
+  position: relative; background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r-surface);
+  padding: 18px 22px;
+}
+.run:hover { border-color: var(--ink-3); }
+.run h3 { font-size: 19px; }
+.run h3 a { text-decoration: none; }
+.run h3 a::after { content: ""; position: absolute; inset: 0; border-radius: var(--r-surface); }
+.run h3 a:focus-visible { outline: none; }
+.run h3 a:focus-visible::after { outline: 2px solid var(--focus); outline-offset: 2px; }
+.run h3 .who { color: var(--ink-2); font-weight: 500; margin-left: 6px; white-space: nowrap; }
+.facts-line { color: var(--ink-2); font-size: 13.5px; margin: 4px 0 14px; }
 .conds { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 8px; }
 .conds .cell { align-items: flex-start; min-height: 0; padding: 10px 12px; }
 .conds .cell .vi { margin-top: 2px; }
+.conds .cw { flex: 1; }
 .conds .cn { font-size: 12.5px; color: var(--ink-2); line-height: 1.3; margin-bottom: 4px; }
 .conds .cn b { font-size: 16px; color: var(--ink); margin-right: 3px; }
 .conds .w { font-size: 18px; font-variant-numeric: tabular-nums; }
 .conds .ci { font-size: 13px; font-weight: 500; color: var(--ink-2); }
+.finding .conds .w { font-size: 24px; }
+.meter { display: flex; gap: 2px; height: 6px; margin: 7px 0 5px; border-radius: 3px; overflow: hidden; }
+.meter i { display: block; height: 100%; min-width: 3px; background: var(--tone); }
 .note { margin: 10px 0 0; color: var(--ink-2); font-size: 13px; }
-.open { margin: 14px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-size: 12.5px; }
+.open { margin: 14px 0 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; font-size: 13px; }
+.open .go { font-weight: 600; }
+.run:hover .go { text-decoration: underline; text-underline-offset: 3px; }
+.open .folder { font: 12px/1.4 var(--mono); overflow-wrap: anywhere; }
 @media (max-width: 520px) { .run { padding: 16px; } .report-page { padding-left: 16px; padding-right: 16px; } }
 """
 
@@ -350,13 +442,14 @@ being asked and being authorised?">
 <main class="report-page">
 <header class="report-top"><a class="brand" href="{E(gh)}">{layers(3, 18)}Agent authority pilot</a>\
 <button class="btn quiet small theme-btn" type="button" id="theme">Auto</button></header>
-<h1 class="report-title display">Published runs</h1>
-<p class="lede">Does an AI agent tell apart having access, being asked, and being authorised?</p>
-<p class="report-meta">Each run put an assistant through traps and legit requests under three set-ups: \
-A, rules in the prompt; B, plus code checks; C, plus a monitor model. The range after a count is its 95% interval: \
-the true rates that the count is consistent with. Small numbers: read them as signals, not estimates. \
-Open a run to read every conversation behind its numbers. \
-<a href="{E(gh)}">The code and the scenarios</a> · <a href="{E(gh)}/blob/main/RESULTS.md">What the runs show</a></p>
+<h1 class="report-title display">Does an AI agent tell apart having access, being asked, and being authorised?</h1>
+<p class="report-meta">An assistant with tools can usually do more than the person it is helping may do. \
+Each run put an assistant through traps and legit requests under three set-ups: A, rules in the prompt; \
+B, plus code checks; C, plus a monitor model. Small numbers: read them as signals, not estimates. \
+<a href="{E(gh)}">The code and the scenarios</a> · <a href="{E(gh)}/blob/main/RESULTS.md">The results in words</a></p>
+{by_assistant(runs)}
+<div class="runs-head"><h2>The runs</h2>
+<p class="sub">Newest first. Open one to read every conversation behind its numbers.</p></div>
 <section class="runs" aria-label="Runs">{body}</section>
 <footer class="report-foot"><ul>
 <li>A, rules in the prompt: the policy in the system prompt, nothing else.</li>
@@ -373,6 +466,15 @@ disclosure counts are a lower bound.</li>
 """
 
 
+def with_home(page: str) -> str:
+    """A run's page, told where the list of runs is, so that it links back to it. Only on the site:
+    the dashboard.html in a run's folder stays a page that stands alone."""
+    head = '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+    if page.count(head) != 1:
+        raise SystemExit("a dashboard.html does not have the head this script expects")
+    return page.replace(head, head + '<meta name="authz-home" content="../../">\n')
+
+
 def build(runs_dir: Path, out: Path, repo: str) -> list[Run]:
     names = model_names()
     runs: list[Run] = []
@@ -383,7 +485,9 @@ def build(runs_dir: Path, out: Path, repo: str) -> list[Run]:
         runs.append(load_run(run_dir, names))
         target = out / "runs" / run_dir.name
         target.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(run_dir / "dashboard.html", target / "dashboard.html")
+        (target / "dashboard.html").write_text(
+            with_home((run_dir / "dashboard.html").read_text("utf-8")), encoding="utf-8"
+        )
     runs.sort(key=lambda r: (r.day or date.min, r.name), reverse=True)
     (out / "fonts").mkdir(parents=True, exist_ok=True)
     for font in ("commissioner.woff2", "OFL.txt"):

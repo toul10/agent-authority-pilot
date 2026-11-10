@@ -13,6 +13,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .models import model_info
 from .runner import CONDITIONS
 from .scoring import VIOLATIONS, EpisodeScore, summarize
 from .world import World
@@ -114,6 +115,7 @@ def build_payload(world: World, config: dict, run_name: str, items: list[tuple[E
         "generated": datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
         "config": {k: v for k, v in config.items() if k != "data_dir"},  # no local paths in the page
         "data_hash": config.get("data_hash") or world.data_hash,  # the data the run used
+        "names": {m: info.name for m in (config.get("agent"), config.get("monitor")) if m and (info := model_info(m))},
         "conditions": {c: CONDITIONS[c] for c in summary},
         "short": {c: SHORT.get(c, c) for c in summary},
         "summary": summary,

@@ -215,6 +215,41 @@ function cellEl(c, s, onOpen, seen, multi) {
   return h("div", { class: "cell " + (skipped ? "skipped" : "waiting"), "data-key": c.key },
     h("span", { class: "cw" }, h("span", { class: "w", text: skipped ? "Not run" : "Waiting" })));
 }
+// Repeats of one scenario under one set-up: a small mark each, side by side, and one line that counts them.
+function chipEl(c, s, onOpen, seen) {
+  const where = `${s.id} under ${c.condition}, repeat ${c.repeat}`;
+  const num = h("span", { class: "n", text: String(c.repeat) });
+  if (c.state === "done") {
+    const v = verdict(c.outcome);
+    const d = detail(c);
+    const said = v.label + (d ? ", " + d : "");
+    const was = seen ? seen.get(c.key) : undefined;
+    const props = { class: `chip t-${v.tone}` + (was !== undefined && was !== "done" ? " fresh" : ""), "data-key": c.key, title: `Repeat ${c.repeat}: ${said}` };
+    const kids = [badge(c.outcome, 16), num];
+    if (!onOpen) return h("div", { ...props, role: "img", "aria-label": `${where}: ${said}` }, kids);
+    const el = h("button", { ...props, type: "button", "aria-label": `${where}: ${said}. Read the conversation.` }, kids);
+    el.addEventListener("click", () => onOpen(c, el));
+    return el;
+  }
+  const state = c.state === "running" ? "running" : c.state === "skipped" ? "skipped" : "waiting";
+  const said = { running: "running", skipped: "not run", waiting: "waiting" }[state];
+  return h("div", { class: "chip " + state, "data-key": c.key, role: "img", "aria-label": `${where}: ${said}`, title: `Repeat ${c.repeat}: ${said}` },
+    state === "running" ? h("span", { class: "pulse", "aria-hidden": "true" }) : null, num);
+}
+function repsEl(list, s, onOpen, seen) {
+  const count = new Map();
+  const add = word => count.set(word, (count.get(word) || 0) + 1);
+  for (const k of LEGEND_ORDER) for (const c of list) if (c.state === "done" && c.outcome === k) add(verdict(k).word);
+  for (const c of list) if (c.state === "done" && !VERDICT[c.outcome]) add(VERDICT.error.word);
+  for (const [state, word] of [["running", "Running"], ["waiting", "Waiting"], ["skipped", "Not run"]]) for (const c of list) if (c.state === state) add(word);
+  const details = [...new Set(list.filter(c => c.state === "done").map(detail).filter(Boolean))];
+  return [
+    h("div", { class: "reps" }, list.map(c => chipEl(c, s, onOpen, seen))),
+    h("div", { class: "reps-note", "aria-hidden": "true" },
+      h("span", { class: "w", text: [...count].map(([word, n]) => `${word} ×${n}`).join(" · ") }),
+      details.length ? h("span", { class: "d", text: details.join("; ") }) : null),
+  ];
+}
 function scorecard({ groups, conditions, cells, onOpen, seen, labelled }) {
   const at = new Map();
   for (const c of cells) {
@@ -230,7 +265,7 @@ function scorecard({ groups, conditions, cells, onOpen, seen, labelled }) {
         h("th", { scope: "row" }, h("span", { class: "sid", text: s.id }), h("span", { class: "stitle", text: s.title || "" })),
         conditions.map(c => {
           const list = (at.get(s.id + "\n" + c) || []).slice().sort((a, b) => a.repeat - b.repeat);
-          return h("td", {}, list.map(x => cellEl(x, s, onOpen, seen, list.length > 1)));
+          return h("td", {}, list.length > 1 ? repsEl(list, s, onOpen, seen) : list.map(x => cellEl(x, s, onOpen, seen, false)));
         })));
     }
   }
@@ -243,9 +278,9 @@ function scorecard({ groups, conditions, cells, onOpen, seen, labelled }) {
     body);
 }
 // The scorecard with its legend and, for a bigger run, filters by kind of scenario.
-function board({ scenarios, conditions, onOpen }) {
+function board({ scenarios, conditions, onOpen, show }) {
   const groups = groupScenarios(scenarios);
-  let filter = "all", cells = [], seen = null;
+  let filter = groups.some(g => g.key === show) ? show : "all", cells = [], seen = null;
   const legendHost = h("div");
   const filterRow = h("div", { class: "filters", role: "group", "aria-label": "Show scenarios" });
   const tableHost = h("div");
@@ -360,7 +395,8 @@ function stacked(title, subtitle, cats, group, conds, footnote) {
     chart, table, footnote ? h("p", { class: "footnote", text: footnote }) : null);
 }
 const stoppedByError = e => e.stopped === "error" || e.stopped === "incomplete";
-function summary(DATA) {
+// part: "top" for the numbers and the charts, "tables" for the two tables, nothing for all of it.
+function summary(DATA, part) {
   const conds = Object.keys(DATA.summary);
   const eps = DATA.episodes;
   const cfg = DATA.config || {};
@@ -379,7 +415,7 @@ function summary(DATA) {
   ];
   const mon = DATA.monitor && DATA.monitor.C;
   if (mon) stats.push(["Monitor reviews", String(mon.reviews || 0), `${mon.blocks || 0} blocked, ${plural(mon.errors || 0, "error", "errors")}`]);
-  out.append(h("div", { class: "stats", role: "list", "aria-label": "Run totals" }, stats.map(([label, value, note, kind]) =>
+  if (part !== "tables") out.append(h("div", { class: "stats", role: "list", "aria-label": "Run totals" }, stats.map(([label, value, note, kind]) =>
     h("div", { class: "stat", role: "listitem" }, h("div", { class: "label", text: label }), h("div", { class: "value" }, kind ? badge(kind, 18) : null, value), h("div", { class: "note", text: note })))));
 
   const charts = h("div", { class: "charts", style: "margin-top:28px" });
@@ -388,9 +424,10 @@ function summary(DATA) {
     const blocked = conds.map(c => `${c} ${eps.filter(e => e.condition === c).reduce((a, e) => a + e.false_blocks.length, 0)}`).join(", ");
     charts.append(stacked("Legit requests: were they done?", "Legit episodes per set-up. Done means every expected action happened, with no violation.", LEGIT_CATS, legit, conds, "Harmless actions blocked by a check: " + blocked + "."));
   }
-  out.append(charts);
+  if (part !== "tables") out.append(charts);
+  if (part === "top") return out;
 
-  const tables = h("div", { class: "charts", style: "margin-top:32px" });
+  const tables = h("div", { class: "charts", style: part === "tables" ? "" : "margin-top:32px" });
   if (traps.length) {
     const fams = Object.keys(FAMILY).filter(f => traps.some(e => e.trap === f));
     const thin = list => {
@@ -592,15 +629,25 @@ const app = document.getElementById("app");
 const cfg = DATA.config || {};
 const eps = DATA.episodes;
 const drawer = makeDrawer();
+// The models by name where the page was given their names, by id otherwise.
+const modelName = id => (DATA.names || {})[id] || id || "unknown";
+const title = cfg.dry_run ? "Scripted assistant" : modelName(cfg.agent);
+document.title = `${title} · Agent authority pilot`;
+// Set only on a page that sits next to a list of runs (the published site).
+const homeEl = document.querySelector('meta[name="authz-home"]');
+const home = homeEl ? homeEl.getAttribute("content") : null;
 const meta = [
-  cfg.dry_run ? "Scripted assistant, no API." : `Assistant ${cfg.agent || "unknown"}` + (cfg.effort ? ` at ${cfg.effort} effort.` : "."),
-  cfg.monitor ? `Monitor ${cfg.monitor}` + (cfg.monitor_effort ? ` at ${cfg.monitor_effort} effort.` : ".") : null,
+  cfg.dry_run ? "No API was called." : `The assistant ran${cfg.effort ? ` at ${cfg.effort} effort` : ""}.`,
+  cfg.monitor ? `Monitor ${modelName(cfg.monitor)}` + (cfg.monitor_effort ? ` at ${cfg.monitor_effort} effort.` : ".") : null,
   { user_turn: "Operator notices went to the assistant inside the user's turn, not as system messages.", developer: "Operator notices went to the assistant as developer messages." }[cfg.notices] || null,
   `Data ${DATA.data_hash}, page made ${DATA.generated}.`,
 ].filter(Boolean).join(" ");
 app.append(
-  h("header", { class: "report-top" }, h("span", { class: "brand" }, layers(3, 3, 18), "Agent authority pilot"), themeButton()),
-  h("h1", { class: "report-title display", text: DATA.run }),
+  h("header", { class: "report-top" },
+    h(home ? "a" : "span", { class: "brand", href: home }, layers(3, 3, 18), "Agent authority pilot"),
+    h("div", { class: "top-actions" }, home ? h("a", { class: "btn quiet small", href: home, text: "All runs" }) : null, themeButton())),
+  h("p", { class: "report-kicker", text: DATA.run }),
+  h("h1", { class: "report-title display", text: title }),
   h("p", { class: "report-meta", text: meta }));
 if (cfg.dry_run) {
   app.append(h("div", { class: "banner", role: "note" }, badge("refusal"),
@@ -618,21 +665,27 @@ function showEpisode(ep, from) {
   try { history.replaceState(null, "", "#episode=" + ep.key); } catch (e) {}
 }
 const conds = Object.keys(DATA.summary);
+const shown = hashParts.find(p => p.startsWith("show="));
 const b = board({
   scenarios: DATA.scenarios.filter(s => eps.some(e => e.scenario === s.id)),
   conditions: conds,
+  show: shown ? shown.slice(5) : null,
   onOpen: (c, from) => { const ep = eps.find(e => e.key === c.key); if (ep) showEpisode(ep, from); },
 });
 b.update(eps.map(fromEpisode));
 app.append(
+  h("section", { class: "report-section", "aria-labelledby": "s-sum" },
+    h("h2", { id: "s-sum", text: "Totals" }),
+    h("p", { class: "sub", text: "Counts per set-up. Small numbers: read them as signals, not estimates." }),
+    summary(DATA, "top")),
   h("section", { class: "report-section", "aria-labelledby": "s-board" },
     h("h2", { id: "s-board", text: "Every episode" }),
     h("p", { class: "sub", text: "One row per scenario, one column per set-up. Select a result to read the conversation." }),
     b.el),
-  h("section", { class: "report-section", "aria-labelledby": "s-sum" },
-    h("h2", { id: "s-sum", text: "Totals" }),
-    h("p", { class: "sub", text: "Counts per set-up. Small numbers: read them as signals, not estimates." }),
-    summary(DATA)),
+  h("section", { class: "report-section", "aria-labelledby": "s-more" },
+    h("h2", { id: "s-more", text: "By family and by type" }),
+    h("p", { class: "sub", text: "Where the violations that took effect were." }),
+    summary(DATA, "tables")),
   h("footer", { class: "report-foot" }, h("ul", {},
     conds.map(c => h("li", { text: `${c}, ${condName(c).toLowerCase()}: ${DATA.conditions[c]}.` })),
     h("li", { text: "Disclosure is detected with canary values, so a paraphrase that avoids the exact value is not counted: disclosure counts are a lower bound." }))));

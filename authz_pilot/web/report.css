@@ -124,6 +124,7 @@ thead th { color: var(--ink-2); font-size: 12.5px; font-weight: 600; }
 .cond .short { display: none; }
 .layers .on { fill: var(--ink); stroke: var(--paper); stroke-width: 1; }
 .layers .off { fill: none; stroke: var(--rule-2); stroke-width: 1.2; }
+.score tbody td { vertical-align: top; }
 .score tbody th { font-weight: 400; padding: 6px 12px 6px 0; vertical-align: middle; line-height: 1.3; }
 .score .group th { padding: 16px 0 2px; font-size: 13px; font-weight: 650; color: var(--ink-2); }
 .score tbody tr.group:first-child th { padding-top: 4px; }
@@ -141,6 +142,24 @@ button.cell:hover { background: color-mix(in oklab, var(--tone) calc(var(--tint)
 .cell .cw { display: flex; flex-direction: column; min-width: 0; }
 .cell .w { font-weight: 650; font-size: 14px; line-height: 1.2; }
 .cell .d { font-size: 12.5px; color: var(--ink-2); line-height: 1.25; overflow-wrap: anywhere; }
+/* Repeats: one small mark each, side by side, and a line that counts them. */
+.reps { display: grid; grid-template-columns: repeat(auto-fit, minmax(40px, 1fr)); gap: 4px; }
+.chip {
+  display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 4px 6px;
+  border: 0; border-radius: var(--r-cell); color: var(--ink-2); font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums;
+  background: color-mix(in oklab, var(--tone, var(--rule-2)) var(--tint), var(--sheet));
+  box-shadow: inset 0 -3px 0 var(--tone, var(--rule-2));
+}
+button.chip { cursor: pointer; }
+button.chip:hover { background: color-mix(in oklab, var(--tone) calc(var(--tint) + 12%), var(--sheet)); color: var(--ink); }
+.chip.waiting, .chip.skipped { background: transparent; box-shadow: inset 0 0 0 1px var(--rule-2); color: var(--ink-3); }
+.chip.skipped { box-shadow: none; border: 1px dashed var(--rule-2); }
+.chip.running { background: var(--sunk); box-shadow: inset 0 0 0 1px var(--rule-2); }
+.chip .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--ink); animation: pulse 1.2s ease-in-out infinite; }
+.chip.fresh { animation: stamp 0.55s cubic-bezier(0.2, 0.9, 0.3, 1.25); }
+.reps-note { display: flex; flex-wrap: wrap; gap: 0 8px; margin: 4px 0 2px; padding: 0 2px; font-size: 12.5px; line-height: 1.35; }
+.reps-note .w { font-weight: 600; }
+.reps-note .d { color: var(--ink-2); overflow-wrap: anywhere; }
 .cell.waiting, .cell.skipped { background: transparent; box-shadow: inset 0 0 0 1px var(--rule-2); color: var(--ink-3); }
 .cell.skipped { box-shadow: none; border: 1px dashed var(--rule-2); }
 .cell.running {
@@ -155,7 +174,7 @@ button.cell:hover { background: color-mix(in oklab, var(--tone) calc(var(--tint)
 .cell.fresh { animation: stamp 0.55s cubic-bezier(0.2, 0.9, 0.3, 1.25); }
 @keyframes stamp { 0% { transform: scale(1.08); background: var(--tone); } 100% { transform: none; } }
 @media (prefers-reduced-motion: reduce) {
-  .cell.running, .cell .pulse, .cell.fresh { animation: none; }
+  .cell.running, .cell .pulse, .cell.fresh, .chip .pulse, .chip.fresh { animation: none; }
 }
 .board { container-type: inline-size; }
 @container (max-width: 620px) {
@@ -263,6 +282,9 @@ details > summary { cursor: pointer; }
 .report-page { max-width: 1180px; margin: 0 auto; padding: 22px 20px 72px; }
 .report-top { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .brand { display: inline-flex; align-items: center; gap: 9px; font-weight: 700; font-size: 15px; text-decoration: none; }
+.top-actions { display: flex; align-items: center; gap: 4px; }
+.report-kicker { margin: 34px 0 0; color: var(--ink-3); font: 12.5px/1.4 var(--mono); overflow-wrap: anywhere; }
+.report-kicker + .report-title { margin-top: 6px; }
 .report-title { margin: 34px 0 8px; font-size: clamp(28px, 4.4vw, 44px); line-height: 1.04; overflow-wrap: anywhere; }
 .report-meta { color: var(--ink-2); font-size: 14px; max-width: 75ch; }
 .banner { display: flex; gap: 10px; align-items: flex-start; margin: 18px 0 0; padding: 11px 14px; border-radius: 10px; background: var(--sunk); box-shadow: inset 3px 0 0 var(--ink-3); font-size: 14px; max-width: 80ch; }

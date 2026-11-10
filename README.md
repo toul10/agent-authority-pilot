@@ -6,9 +6,9 @@ A small, reproducible experiment on one question: **does an AI agent tell apart 
 
 **What the runs show so far.** With Claude Haiku 4.5 as the assistant, on six harder traps run three times each, a violation took effect in 7 of 18 trap episodes with rules in the prompt only (20–61%), in 8 of 18 with code checks added (25–66%), and in none of 18 with a monitor model added (0–18%). The code checks blocked nothing, and the monitor, a stronger model watching a weaker one, stopped all seven attempts it saw. Over its four runs, Claude Opus 5.5 had a violation in 1 of 90 trap episodes with the prompt alone (0.2–6%). These are small samples: read them as signals, not estimates. [Results](#results) has every run, and [RESULTS.md](RESULTS.md) the details.
 
-[![The scorecard of the Claude Haiku 4.5 run, filtered to its four cross-context traps, recorded as U02–U05 (now T17–T20), with one cell per episode. Under A, rules in the prompt, a violation took effect in 6 of the 12 episodes; under B, plus code checks, also in 6; under C, plus a monitor model, in none, and the monitor stopped 5 attempts.](docs/scorecard.png)](https://toul10.github.io/agent-authority-pilot/runs/2026-11-05-harder-traps-claude-haiku-4-5/dashboard.html)
+[![The page of the Claude Haiku 4.5 run on the six harder traps. A chart of its trap episodes: under A, rules in the prompt, a violation took effect in 7 of 18; under B, plus code checks, in 8 of 18; under C, plus a monitor model, in none, and the monitor stopped 7. Below it, every episode as one mark per repeat, by scenario and set-up.](docs/scorecard.png)](https://toul10.github.io/agent-authority-pilot/runs/2026-11-05-harder-traps-claude-haiku-4-5/dashboard.html)
 
-*The Haiku run's scorecard, filtered to its four cross-context traps. They were recorded as U02–U05, before they joined the built-in set as T17–T20. Each cell is one episode; select one on the live page to read the conversation.*
+*The Haiku run's page: the totals, then every episode, one mark per repeat. The scenarios were recorded as U01–U08, before they joined the built-in set as T16–T21, L16 and L17. Select a mark on the live page to read that conversation.*
 
 **[Browse the published runs online](https://toul10.github.io/agent-authority-pilot/):** one page per run, with every conversation behind its numbers. Nothing to install.
 
