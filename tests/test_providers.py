@@ -1,17 +1,28 @@
-"""The OpenAI and Gemini adapters against strict local mocks: requests the APIs accept, replays
-that are exact, usage in the Claude API's terms, and every way an answer can end."""
+"""The OpenAI, Gemini and xAI adapters against strict local mocks: requests the APIs accept,
+replays that are exact, usage in the Claude API's terms, and every way an answer can end."""
 
 import functools
 import json
 
 import pytest
-from mock_providers import GEMINI_KEY, OPENAI_KEY, MockGemini, MockOpenAI, candidate, response
+from mock_providers import (
+    GEMINI_KEY,
+    OPENAI_KEY,
+    XAI_KEY,
+    MockGemini,
+    MockOpenAI,
+    MockXAI,
+    candidate,
+    response,
+)
 
 from authz_pilot.dashboard import outcome
-from authz_pilot.models import MODEL_INFO, cost_usd, model_info
+from authz_pilot.models import MODEL_INFO, VERDICT_SCHEMA, cost_usd, model_info
 from authz_pilot.providers import (
     GeminiAgent,
     GeminiMonitor,
+    GrokAgent,
+    GrokMonitor,
     OpenAIAgent,
     OpenAIMonitor,
     ProviderError,
@@ -20,6 +31,7 @@ from authz_pilot.providers import (
     gemini_contents,
     gemini_usage,
     openai_usage,
+    xai_usage,
 )
 from authz_pilot.runner import run_episode
 from authz_pilot.scoring import score_episode
@@ -27,6 +39,7 @@ from authz_pilot.tools import TOOLS
 
 GPT = [m for m, i in MODEL_INFO.items() if i.provider == "openai"]
 GEMINI = [m for m, i in MODEL_INFO.items() if i.provider == "google"]
+GROK = [m for m, i in MODEL_INFO.items() if i.provider == "xai"]
 
 
 @pytest.fixture
@@ -40,6 +53,13 @@ def openai_api(monkeypatch):
 def gemini_api(monkeypatch):
     with MockGemini() as api:
         monkeypatch.setenv("AUTHZ_PILOT_GEMINI_BASE_URL", api.url)
+        yield api
+
+
+@pytest.fixture
+def xai_api(monkeypatch):
+    with MockXAI() as api:
+        monkeypatch.setenv("AUTHZ_PILOT_XAI_BASE_URL", api.url)
         yield api
 
 
@@ -99,6 +119,34 @@ def test_each_gemini_model_runs_an_episode_with_a_notice_and_the_monitor(world, 
     assert all("key=" not in r["path"] for r in gemini_api.requests)  # the key never goes in the URL
     monitor = [b for b in posts(gemini_api) if b["toolConfig"]["functionCallingConfig"]["mode"] == "ANY"]
     assert monitor and all(e["decision"] == "allow" for e in events if e["event"] == "monitor_call")
+
+
+@pytest.mark.parametrize("effort", ["low", "max"])
+@pytest.mark.parametrize("model", GROK)
+def test_each_grok_model_runs_an_episode_with_a_notice_and_the_monitor(world, xai_api, model, effort):
+    events = run_episode(
+        world,
+        world.scenarios["T13"],
+        "C",
+        GrokAgent(model, effort, api_key=XAI_KEY),
+        GrokMonitor(model, effort, api_key=XAI_KEY),
+    )
+    assert not problems(events), problems(events)
+    sent = posts(xai_api)
+    agent = [b for b in sent if "tools" in b]
+    assert len(agent) >= 4  # two messages, each a tool call and then a reply: every replay was accepted
+    # The notice goes as a system message after the conversation has started, never as a developer message.
+    last = agent[-1]["input"]
+    at = next(i for i, item in enumerate(last) if item.get("role") == "system" and "Operator notice" in item["content"])
+    assert at > 0 and not any(item.get("role") == "developer" for b in sent for item in b["input"])
+    expected = {"low": "low", "max": "high" if model == "grok-4.5" else "xhigh"}[effort]  # Grok has no max
+    assert all(b["reasoning"] == {"effort": expected} and b["store"] is False for b in sent)
+    assert all(b["include"] == ["reasoning.encrypted_content"] and "strict" not in b["tools"][0] for b in agent)
+    calls = [e for e in events if e["event"] == "tool_call"]
+    assert calls and all(c["status"] == "executed" and c["id"].startswith("call_") for c in calls)
+    assert any(e["event"] == "model_call" and any(b["type"] == "thinking" for b in e["content"]) for e in events)
+    reviews = [e for e in events if e["event"] == "monitor_call"]
+    assert reviews and all(e["decision"] == "allow" and e["model"] == model for e in reviews)
 
 
 def test_gemini_call_ids_are_echoed_when_the_api_sends_them(world, monkeypatch):
@@ -192,6 +240,51 @@ def test_the_gemini_mock_rejects_what_the_api_rejects(gemini_api):
         call_json("google", "GET", f"{gemini_api.url}/models/gemini-4-argon?key={GEMINI_KEY}", {}, timeout=5, retries=0)
 
 
+def test_the_xai_mock_rejects_what_the_api_rejects(xai_api):
+    agent = GrokAgent("grok-4.6", api_key=XAI_KEY)
+    history = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+    first = agent.respond("system", TOOLS, history)
+    call = first.tool_calls[0]
+    tampered = [dict(i) for i in first.content]
+    tampered[0]["encrypted_content"] = "changed"
+    with pytest.raises(ProviderError, match="whole, unchanged and in order") as err:
+        agent.respond(
+            "system",
+            TOOLS,
+            [
+                *history,
+                {"role": "assistant", "content": tampered},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call["id"], "content": "[]"}]},
+            ],
+        )
+    # xAI's error body: {"code": <the status, described>, "error": <the message>}
+    assert err.value.status == 400 and err.value.code == "Client specified an invalid argument"
+
+    def post(body: dict) -> None:
+        call_json(
+            "xai",
+            "POST",
+            f"{xai_api.url}/responses",
+            {"Authorization": f"Bearer {XAI_KEY}"},
+            {"model": "grok-4.7", "input": "hi", "store": False} | body,
+            timeout=5,
+            retries=0,
+        )
+
+    with pytest.raises(ProviderError, match="not developer"):
+        post({"input": [{"role": "developer", "content": "Operator notice: hi"}]})
+    with pytest.raises(ProviderError, match=r"not supported by grok-4\.7"):  # the harness maps max to xhigh
+        post({"reasoning": {"effort": "max"}})
+    with pytest.raises(ProviderError, match="cannot be used with reasoning models"):
+        post({"presence_penalty": 0.5})
+    with pytest.raises(ProviderError, match=r"include reasoning\.encrypted_content"):
+        post({"tools": [{"type": "function", "name": "f", "parameters": {"type": "object", "properties": {}}}]})
+    with pytest.raises(ProviderError, match="needs at least one variant"):
+        post({"text": {"format": {"type": "json_schema", "name": "v", "schema": {"type": "string", "enum": []}}}})
+    # What the pilot sends passes xAI's schema rules.
+    post({"text": {"format": {"type": "json_schema", "name": "verdict", "schema": VERDICT_SCHEMA, "strict": True}}})
+
+
 # --------------------------------------------------------------------------- usage, prices, outcomes
 
 
@@ -222,6 +315,47 @@ def test_usage_is_converted_to_the_claude_api_terms():
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 400,
     }
+    # xAI: cached reads are inside input_tokens; its example counts reasoning apart from output_tokens
+    # (32 + 9 + 110 = 151 total), OpenAI inside. total_tokens tells which, so both come out the same.
+    apart = {
+        "input_tokens": 32,
+        "input_tokens_details": {"cached_tokens": 8},
+        "output_tokens": 9,
+        "output_tokens_details": {"reasoning_tokens": 110},
+        "total_tokens": 151,
+    }
+    x = xai_usage(apart)
+    assert x == {
+        "input_tokens": 24,
+        "output_tokens": 119,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 8,
+    }
+    assert xai_usage(apart | {"output_tokens": 119}) == x
+    assert xai_usage({k: v for k, v in apart.items() if k != "total_tokens"}) == x  # without a total: as the example
+
+
+@pytest.mark.parametrize("inside", [False, True])
+def test_a_grok_call_costs_what_xai_reports(monkeypatch, inside):
+    with MockXAI(reasoning_inside=inside) as api:
+        monkeypatch.setenv("AUTHZ_PILOT_XAI_BASE_URL", api.url)
+        step = GrokAgent("grok-4.7", api_key=XAI_KEY).respond("system", TOOLS, [{"role": "user", "content": "hi"}])
+        review = GrokMonitor("grok-4.3", api_key=XAI_KEY).review("system", "review this")
+    # xAI's own cost of each call, in USD ticks (1e-10 USD), from the mock's own copy of the prices.
+    assert cost_usd(step.model, step.usage) == pytest.approx(api.usages[0]["cost_in_usd_ticks"] / 1e10)
+    assert cost_usd(review.model, review.usage) == pytest.approx(api.usages[1]["cost_in_usd_ticks"] / 1e10)
+    assert review.decision == "allow"
+
+
+@pytest.mark.parametrize(("name", "logged"), [("grok-4.3-20261101", "grok-4.3-20261101"), ("grok-x", "grok-4.3")])
+def test_a_grok_answer_under_a_name_without_a_price_still_counts(monkeypatch, name, logged):
+    # A name that matches no price would make the call free, and the spending limit would never see it.
+    with MockXAI(model_name=name) as api:
+        monkeypatch.setenv("AUTHZ_PILOT_XAI_BASE_URL", api.url)
+        step = GrokAgent("grok-4.3", api_key=XAI_KEY).respond("system", TOOLS, [{"role": "user", "content": "hi"}])
+        review = GrokMonitor("grok-4.3", api_key=XAI_KEY).review("system", "review this")
+    assert step.model == review.model == logged
+    assert cost_usd(step.model, step.usage) > 0 and cost_usd(review.model, review.usage) > 0
 
 
 def test_announced_price_changes_apply_from_their_day():
@@ -372,6 +506,26 @@ def test_retries_follow_retry_after_but_never_repeat_a_final_answer(openai_api):
     assert len(waits) == 2  # no wait: a used-up quota does not come back by waiting
 
 
+def test_xai_retries_a_rate_limit_but_not_used_up_credits(xai_api):
+    waits = []
+    call = functools.partial(call_json, sleep=waits.append)
+    busy = (429, {"code": "Some resource has been exhausted", "error": "Rate limit reached for grok-4.7."})
+    xai_api.responses = [busy]
+    agent = GrokAgent("grok-4.7", api_key=XAI_KEY, call=call)
+    assert agent.respond("system", TOOLS, [{"role": "user", "content": "hi"}]).tool_calls and len(waits) == 1
+    spent = (
+        429,
+        {
+            "code": "Some resource has been exhausted",
+            "error": "Your team has either used all available credits or reached its monthly spending limit.",
+        },
+    )
+    xai_api.responses = [spent]
+    with pytest.raises(ProviderError, match="spending limit") as err:
+        agent.respond("system", TOOLS, [{"role": "user", "content": "hi"}])
+    assert err.value.status == 429 and len(waits) == 1  # no wait: credits do not come back by waiting
+
+
 def test_without_reasoning_summaries_the_assistant_carries_on(openai_api):
     refused = (
         400,
@@ -416,3 +570,22 @@ def test_key_check_looks_the_models_up_for_free(openai_api, gemini_api):
         {"assistant": ("gpt-6-luna", "low"), "monitor": ("gemini-3.8-flash", "low")}, {"openai": OPENAI_KEY}
     )
     assert missing["models"][0]["ok"] and missing["models"][1]["problems"] == ["no Google API key yet: add one above"]
+
+
+def test_the_grok_key_check_is_free_and_reads_the_key_state(xai_api, monkeypatch):
+    roles = {"assistant": ("grok-4.7", "high"), "monitor": ("grok-4.3", "low")}
+    result = check_models(roles, {"xai": XAI_KEY})
+    assert result["ok"] and [r["name"] for r in result["models"]] == ["Grok 4.7", "Grok 4.3"]
+    assert [(r["method"], r["path"]) for r in xai_api.requests] == [
+        ("GET", "/v1/api-key"),
+        ("GET", "/v1/models/grok-4.7"),
+        ("GET", "/v1/models/grok-4.3"),
+    ]  # lookups only, no tokens
+    wrong = check_models(roles, {"xai": "xai-wrong-key-0000000000000000000"})
+    assert not wrong["ok"] and "xAI API did not accept this key (400)" in wrong["error"]
+    with MockXAI(blocked=True) as blocked_api:
+        monkeypatch.setenv("AUTHZ_PILOT_XAI_BASE_URL", blocked_api.url)
+        blocked = check_models(roles, {"xai": XAI_KEY})
+    assert not blocked["ok"] and "the key is blocked" in blocked["error"]
+    missing = check_models(roles, {})
+    assert [r["problems"] for r in missing["models"]] == [["no xAI API key yet: add one above"]] * 2

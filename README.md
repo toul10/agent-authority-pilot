@@ -18,9 +18,9 @@ An assistant with tools can usually do more than the person it is helping may do
 - deterministic permission checks in code,
 - a second model that reviews actions before they take effect.
 
-The assistant and the reviewing model can be Claude, GPT or Gemini, so the same 65 scenarios can compare models and providers. Everything runs on your computer, and a local app shows every conversation behind the numbers.
+The assistant and the reviewing model can be Claude, GPT, Gemini or Grok, so the same 65 scenarios can compare models and providers. Everything runs on your computer, and a local app shows every conversation behind the numbers.
 
-**Status:** the harness and the 65 scenarios are complete, and tested with scripted agents and with local mock APIs for all three providers. Five runs on Claude are summarised below: the first full run, two of six harder traps (with Claude Opus 5.5 and with Claude Haiku 4.5), and two more sets, T22–T33 and T34–T40. GPT and Gemini have been tested only against the mock APIs so far.
+**Status:** the harness and the 65 scenarios are complete, and tested with scripted agents and with local mock APIs for all four providers. Five runs on Claude are summarised below: the first full run, two of six harder traps (with Claude Opus 5.5 and with Claude Haiku 4.5), and two more sets, T22–T33 and T34–T40. GPT, Gemini and Grok have been tested only against the mock APIs so far.
 
 ## Results
 
@@ -69,7 +69,7 @@ The last command starts the app and opens http://127.0.0.1:8765/ in your browser
 
 The install also adds an `authz-pilot` command to the environment, which does the same as `python -m authz_pilot`: `.venv/bin/authz-pilot app`, for example.
 
-The install adds one package, the Anthropic Python SDK, with its dependencies. GPT and Gemini are called with Python's standard library.
+The install adds one package, the Anthropic Python SDK, with its dependencies. GPT, Gemini and Grok are called with Python's standard library.
 
 The commands below are written for macOS and Linux. On Windows, write `.venv\Scripts\python` where they say `.venv/bin/python`.
 
@@ -92,12 +92,12 @@ Everything except a real model works without a key, and costs nothing. A scripte
 
 A real run sends the scenarios to the provider's API with your key, and costs money. You see the estimated cost and confirm it before anything is spent.
 
-1. **Get a key** from the provider of each model you choose: the [Claude Console](https://platform.claude.com) for Claude, the [OpenAI dashboard](https://platform.openai.com/api-keys) for GPT, or [Google AI Studio](https://aistudio.google.com/apikey) for Gemini. The default models are both Claude, so they need only a Claude key.
+1. **Get a key** from the provider of each model you choose: the [Claude Console](https://platform.claude.com) for Claude, the [OpenAI dashboard](https://platform.openai.com/api-keys) for GPT, [Google AI Studio](https://aistudio.google.com/apikey) for Gemini, or the [xAI Console](https://console.x.ai) for Grok. The default models are both Claude, so they need only a Claude key.
 2. **Add it** in the app (Start page step 1, or Settings), or from the command line:
 
    ```sh
    .venv/bin/python -m authz_pilot key set                     # a Claude key; the input is hidden
-   .venv/bin/python -m authz_pilot key set --provider openai   # or --provider google
+   .venv/bin/python -m authz_pilot key set --provider openai   # or --provider google, or --provider xai
    ```
 
 3. **Test it, for free:** "Test the key" in the app, or `key test`. It reads the chosen models' details from each API and sends no prompt.
@@ -119,6 +119,7 @@ A run starts no new episode once its estimated spend passes the limit: $20 by de
 | Anthropic (Claude) | `ANTHROPIC_API_KEY` | `api-key` | `anthropic-api-key` |
 | OpenAI (GPT) | `OPENAI_API_KEY` | `openai-api-key` | `openai-api-key` |
 | Google (Gemini) | `GEMINI_API_KEY`, then `GOOGLE_API_KEY` | `gemini-api-key` | `gemini-api-key` |
+| xAI (Grok) | `XAI_API_KEY` | `xai-api-key` | `xai-api-key` |
 
 `key status` shows where each key comes from, and `key remove --provider <name>` deletes a saved one. The app never sends a key back to the browser in full.
 
@@ -147,17 +148,18 @@ The choices are the models with a price in [`authz_pilot/models.py`](authz_pilot
 - **Claude, older:** Fable 5, Opus 5, Sonnet 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 4.6, Opus 4.5 and Haiku 4.5. Sonnet 4.5 is left out because it retires on 30 November 2026.
 - **GPT, from OpenAI:** GPT-6 Astra, GPT-6.1 Sol, GPT-6.1 Terra and GPT-6 Luna.
 - **Gemini, from Google:** Gemini 4 Argon, Gemini 3.8 Flash and Gemini 3.5 Flash-Lite.
+- **Grok, from xAI:** Grok 4.7, Grok 4.6, Grok 4.5 and Grok 4.3. Grok 4.20 and Grok Build 0.1 are left out because xAI's docs give them no effort levels.
 
 Models differ in what they take, and the harness adapts each request:
 
-- **Effort.** Opus 4.6 and Sonnet 4.6 have no `xhigh`, and Gemini models have only low, medium and high thinking levels. A setting a model lacks becomes the nearest level below it, and the app's menus offer only the levels the chosen model has.
+- **Effort.** Opus 4.6 and Sonnet 4.6 have no `xhigh`. Gemini models and Grok 4.5 have only low, medium and high, and the other Grok models stop at `xhigh`. A setting a model lacks becomes the nearest level below it, and the app's menus offer only the levels the chosen model has.
 - **Thinking.** Opus 4.5 and Haiku 4.5 have no effort setting and no adaptive thinking. As the assistant, they think with a fixed budget that the effort setting picks: 1K tokens for `low`, 2K for `medium`, 4K for `high`, 8K for `xhigh` and 12K for `max`. As the monitor, they run without extended thinking.
-- **Reasoning in the logs.** Where a model allows it, the harness asks for a summary of its reasoning: summarized thinking from Claude, reasoning summaries from GPT, thought summaries from Gemini. `show --thinking` prints them.
+- **Reasoning in the logs.** Where a model allows it, the harness asks for a summary of its reasoning: summarized thinking from Claude, reasoning summaries from GPT and Grok, thought summaries from Gemini. `show --thinking` prints them.
 - **Operator notices.** Not every model accepts a system message in the middle of a conversation, so notices reach the assistant in one of three ways:
 
 | `notices` | Models | How a notice arrives |
 |---|---|---|
-| `system` | Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Fable 5, Opus 5 and Opus 4.8 | a system message |
+| `system` | Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Fable 5, Opus 5 and Opus 4.8; every Grok model | a system message |
 | `user_turn` | Claude Haiku 5.5, Sonnet 5, Opus 4.7 and the older Claude models; every Gemini model | a `<system-reminder>` block at the end of the user's turn |
 | `developer` | every GPT model | a developer message, OpenAI's nearest match to a system message |
 
@@ -167,6 +169,7 @@ Provider details:
 
 - **OpenAI.** Requests set `store: false` and send the whole conversation each time, instead of keeping it on OpenAI's side. Each earlier reply goes back exactly as it arrived, encrypted reasoning included. OpenAI watches GPT-6 Astra's agent actions on its own side, so trap scenarios may send alerts to your OpenAI organization. If OpenAI stops a conversation, the episode ends as "Provider stopped", a separate outcome in the results.
 - **Gemini.** The key goes in a request header, never in the URL. Each earlier reply goes back exactly as it arrived, thought signatures included.
+- **xAI.** As with OpenAI, requests set `store: false` and send the whole conversation, and each earlier reply goes back exactly as it arrived, encrypted reasoning included. Operator notices go as system messages, because xAI's docs let system, user and assistant messages come in any order. That has not been tried against the live API yet; the smoke test has a notice, so it shows whether notices arrive. xAI holds every tool call's arguments to the tool's schema, so a Grok assistant cannot send input that the harness would record as an invalid call. A prompt of 200K tokens or more costs twice as much per token, a size the pilot's prompts never reach.
 - **Prices.** Announced price changes are built in. From 1 December 2026, Gemini 4 Argon costs $4 per million input tokens and $20 per million output tokens (before that, $2 and $10). From 1 January 2027, Gemini 3.8 Flash costs $1.50 and $7.50 (before that, $0.75 and $3.75). Each call is counted at the price of the day it was made.
 
 `key test` also checks each chosen model: that the API offers it to your key and, where the API reports it, that the model supports what the harness asks of it.
@@ -349,7 +352,7 @@ With Opus 5.5 and Sonnet 5.5, the smoke test (4 episodes) cost about $0.09 and t
 .venv/bin/python -m pytest
 ```
 
-The tests need no network and no key. They run every scenario with the scripted agents, and every request to Claude, GPT and Gemini against local mock APIs: [`tests/mock_api.py`](tests/mock_api.py) and [`tests/mock_providers.py`](tests/mock_providers.py). The mocks reject what the real APIs are documented to reject, and check that each earlier reply is sent back exactly as it arrived. GitHub Actions runs the tests on Linux, macOS and Windows, with Python 3.11 and 3.14.
+The tests need no network and no key. They run every scenario with the scripted agents, and every request to Claude, GPT, Gemini and Grok against local mock APIs: [`tests/mock_api.py`](tests/mock_api.py) and [`tests/mock_providers.py`](tests/mock_providers.py). The mocks reject what the real APIs are documented to reject, and check that each earlier reply is sent back exactly as it arrived. GitHub Actions runs the tests on Linux, macOS and Windows, with Python 3.11 and 3.14.
 
 The same install adds the linter and the type checker, which GitHub Actions also runs:
 
@@ -367,6 +370,7 @@ The same install adds the linter and the type checker, which GitHub Actions also
 ANTHROPIC_BASE_URL=http://127.0.0.1:8799 ANTHROPIC_API_KEY=sk-ant-mock-0000000000000000 \
 AUTHZ_PILOT_OPENAI_BASE_URL=http://127.0.0.1:8798/openai/v1 OPENAI_API_KEY=sk-mock-openai-0000000000000000 \
 AUTHZ_PILOT_GEMINI_BASE_URL=http://127.0.0.1:8798/gemini/v1beta GEMINI_API_KEY=AIzaMockGemini00000000000000000000000 \
+AUTHZ_PILOT_XAI_BASE_URL=http://127.0.0.1:8798/xai/v1 XAI_API_KEY=xai-mock-0000000000000000000000000000 \
   .venv/bin/python -m authz_pilot app --results results/mock
 kill %1 %2   # afterwards, stop the mocks
 ```
@@ -378,11 +382,11 @@ The mock keys in these variables take precedence over any key you saved, so your
 - **`python3` or `py` is not found, or the version is older than 3.11.** Install Python from [python.org](https://www.python.org/downloads/). On Windows, its installer also adds the `py` command.
 - **"Cannot listen on 127.0.0.1:8765".** Another program is using the port. Start the app with `--port 8766`.
 - **The page shows "Reload the page".** The app was restarted, and each start issues a new access token. Reload any page that was open.
-- **"No Anthropic API key found"** (or OpenAI, or Google). A chosen model runs on that provider's API. Add its key as in [Run it on a real model](#run-it-on-a-real-model).
+- **"No Anthropic API key found"** (or OpenAI, Google or xAI). A chosen model runs on that provider's API. Add its key as in [Run it on a real model](#run-it-on-a-real-model).
 
 ## Project layout
 
-- `authz_pilot/runner.py` runs the scenarios and logs every step. `tools.py` holds the tools and condition B's code checks; `models.py` and `providers.py` call Claude, GPT and Gemini; `scoring.py` scores episodes from their logs.
+- `authz_pilot/runner.py` runs the scenarios and logs every step. `tools.py` holds the tools and condition B's code checks; `models.py` and `providers.py` call Claude, GPT, Gemini and Grok; `scoring.py` scores episodes from their logs.
 - `authz_pilot/app.py` and `authz_pilot/web/` are the local app; `dashboard.py` writes the page for each run.
 - `data/world.toml` and `data/scenarios.toml` hold the fictional company and the scenarios. `world.py` loads and checks them, with your additions for your own scenarios; `additions.py` turns the Company page's form into `custom/world.toml`, and `custom.py` does the same for your scenarios.
 - `tests/` holds the tests and the mock APIs.
@@ -392,7 +396,7 @@ The mock keys in these variables take precedence over any key you saved, so your
 ## Design notes
 
 - **No refusal fallback.** If the model refuses, the refusal is recorded and the episode stops. A server-side fallback would quietly swap in a different model under test.
-- **Append-only history.** Every request extends the previous one without editing it. This keeps prompt caching and Opus 5.5's preserved thinking valid, and a test checks it. GPT's and Gemini's replies go back exactly as they arrived, and the mocks check that too.
+- **Append-only history.** Every request extends the previous one without editing it. This keeps prompt caching and Opus 5.5's preserved thinking valid, and a test checks it. GPT's, Gemini's and Grok's replies go back exactly as they arrived, and the mocks check that too.
 - **Effort and thinking are explicit.** Thinking is always on for the assistant, and effort is set explicitly so that runs are comparable.
 - **A blocked reply is never delivered.** In condition C, the assistant learns about it from an operator notice on its next turn.
 - **Scripted agents check the scenarios.** The oracle does exactly what each turn expects. It must finish every legit scenario without a violation, and condition B must never block it. The gullible agent takes every bait, and must trigger a violation in every trap under condition A. Both run in `validate` and in the tests.

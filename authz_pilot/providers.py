@@ -1,19 +1,22 @@
-"""The assistant and the monitor on the OpenAI and Gemini APIs, over plain HTTPS (no SDKs).
+"""The assistant and the monitor on the OpenAI, Gemini and xAI APIs, over plain HTTPS (no SDKs).
 
 The runner keeps the conversation in the Claude API's shape: user turns with text and
 tool_result blocks, system messages for operator notices, and assistant turns holding
 whatever the provider returned. Each adapter here turns that history into its API's
-request, sends back its own earlier output exactly as it arrived (OpenAI's encrypted
-reasoning items, Gemini's thought signatures), and turns each answer into the blocks the
-runner reads: text, thinking and tool_use.
+request, sends back its own earlier output exactly as it arrived (the encrypted reasoning
+items of OpenAI and xAI, Gemini's thought signatures), and turns each answer into the
+blocks the runner reads: text, thinking and tool_use.
 
-Both adapters keep no state between calls, so one instance can serve every episode of a
-run: OpenAI requests use store=false and carry the whole conversation.
+The adapters keep no state between calls, so one instance can serve every episode of a
+run: OpenAI and xAI requests use store=false and carry the whole conversation.
 
-Request and response shapes, checked 2026-11-05:
+Request and response shapes, checked 2026-11-05 (xAI: 2026-11-12):
 - OpenAI Responses API: https://developers.openai.com/api/reference/resources/responses/methods/create
   and https://developers.openai.com/api/docs/guides/function-calling
 - Gemini generateContent: https://ai.google.dev/api/generate-content
+- xAI Responses API: https://docs.x.ai/developers/rest-api-reference/inference/responses, the stateless
+  tool loop in https://docs.x.ai/developers/model-capabilities/text/best-practices, and
+  https://docs.x.ai/developers/model-capabilities/text/structured-outputs
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ from .models import (
     effort_for,
     inline_system_messages,
     model_info,
+    notices_channel,
     parse_verdict,
     provider_of,
 )
@@ -47,9 +51,17 @@ from .settings import PROVIDERS
 if TYPE_CHECKING:
     from .runner import Agent, Monitor
 
-BASES = {"openai": "https://api.openai.com/v1", "google": "https://generativelanguage.googleapis.com/v1beta"}
+BASES = {
+    "openai": "https://api.openai.com/v1",
+    "google": "https://generativelanguage.googleapis.com/v1beta",
+    "xai": "https://api.x.ai/v1",
+}
 # For the mock APIs in tests.
-BASE_ENV = {"openai": "AUTHZ_PILOT_OPENAI_BASE_URL", "google": "AUTHZ_PILOT_GEMINI_BASE_URL"}
+BASE_ENV = {
+    "openai": "AUTHZ_PILOT_OPENAI_BASE_URL",
+    "google": "AUTHZ_PILOT_GEMINI_BASE_URL",
+    "xai": "AUTHZ_PILOT_XAI_BASE_URL",
+}
 
 
 def base_url(provider: str) -> str:
@@ -85,19 +97,26 @@ RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
 
 def _error_fields(provider: str, payload) -> tuple[str, str | None, str | None]:
-    """(message, code, param) from an error body: OpenAI's {"error": {...}} or google.rpc's."""
+    """(message, code, param) from an error body: OpenAI's {"error": {...}}, google.rpc's, or
+    {"code": "...", "error": "..."} with the message as a string, as xAI's API answers."""
     err = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(err, str) and err:
+        code = payload.get("code")
+        return err[:500], None if code is None else str(code), None
     if not isinstance(err, dict):
         return "no details", None, None
     message = str(err.get("message") or "no details")[:500]
-    if provider == "openai":
+    if provider in ("openai", "xai"):
         return message, err.get("code") or err.get("type"), err.get("param")
     reason = next((d.get("reason") for d in err.get("details") or [] if isinstance(d, dict) and d.get("reason")), None)
     return message, reason or err.get("status"), None
 
 
-def _retryable(status: int, code: str | None) -> bool:
+def _retryable(provider: str, status: int, code: str | None, message: str = "") -> bool:
     if status == 429:
+        # xAI's docs give no code for used-up credits or a reached spending limit; its message names them.
+        if provider == "xai" and any(words in message.lower() for words in ("credits", "spending limit")):
+            return False
         return code not in FINAL_429 and not (code or "").endswith("_spend_limit_exceeded")
     return status in RETRY_STATUS
 
@@ -142,7 +161,7 @@ def call_json(
                 payload = {"error": {"message": raw[:300].decode("utf-8", "replace")}}
             message, code, param = _error_fields(provider, payload)
             got = {k.lower(): v for k, v in (exc.headers or {}).items()}
-            if attempt < retries and _retryable(exc.code, code):
+            if attempt < retries and _retryable(provider, exc.code, code, message):
                 sleep(_pause(attempt, got.get("retry-after")))
                 continue
             raise ProviderError(
@@ -194,16 +213,17 @@ def openai_tools(tools: list[dict]) -> list[dict]:
     ]
 
 
-def openai_input(messages: list[dict]) -> list[dict]:
+def openai_input(messages: list[dict], notices: str = "developer") -> list[dict]:
     """Responses API input for the runner's history: tool results as function_call_output items,
-    operator notices as developer messages, the model's earlier output items unchanged."""
+    operator notices as messages with the role `notices` (OpenAI: developer, xAI: system), the
+    model's earlier output items unchanged."""
     items: list[dict] = []
     for m in messages:
         role, content = m["role"], m["content"]
         if role == "assistant":
             items.extend(content)  # every output item, in order, as it came back
         elif role == "system":
-            items.append({"role": "developer", "content": content})
+            items.append({"role": notices, "content": content})
         else:
             blocks = _text_blocks(content)
             items += [
@@ -230,14 +250,20 @@ def openai_usage(usage: dict | None) -> dict:
     }
 
 
-def openai_step(data: dict, model: str, request_id: str | None) -> Step:
+def _texts(parts) -> str:
+    return "\n\n".join(p["text"] for p in parts or [] if isinstance(p, dict) and p.get("text"))
+
+
+def openai_step(data: dict, model: str, request_id: str | None, usage=openai_usage) -> Step:
+    """A Responses API answer (OpenAI's, or xAI's with usage=xai_usage) as the blocks the runner reads."""
     items = data.get("output") or []
     blocks: list[dict] = []
     refusal = None
     for item in items:
         kind = item.get("type")
         if kind == "reasoning":
-            text = "\n\n".join(s["text"] for s in item.get("summary") or [] if isinstance(s, dict) and s.get("text"))
+            # The summary; failing that, reasoning text, which some reasoning items carry instead.
+            text = _texts(item.get("summary")) or _texts(item.get("content"))
             if text:
                 blocks.append({"type": "thinking", "thinking": text})
         elif kind == "message":
@@ -269,7 +295,7 @@ def openai_step(data: dict, model: str, request_id: str | None) -> Step:
         blocks=blocks,
         stop_reason=stop,
         stop_details=details,
-        usage=openai_usage(data.get("usage")),
+        usage=usage(data.get("usage")),
         model=data.get("model") or model,
         request_id=request_id,
     )
@@ -390,13 +416,18 @@ class OpenAIMonitor(_OpenAI):
                 request_id=exc.request_id,
                 error=f"provider_stop: {exc}",
             )
-        step = openai_step(data, self.model, headers.get("x-request-id"))
-        meta: dict[str, Any] = {"usage": step.usage, "model": step.model, "request_id": step.request_id}
-        if step.stop_reason == "refusal":
-            return Verdict("block", "The monitor model declined to review this action.", error="refusal", **meta)
-        if step.stop_reason != "end_turn":
-            return Verdict("block", "The monitor's answer was cut off.", error=step.stop_reason, **meta)
-        return parse_verdict("".join(step.texts), meta)
+        return responses_verdict(openai_step(data, self.model, headers.get("x-request-id")))
+
+
+def responses_verdict(step: Step) -> Verdict:
+    """The monitor's decision from a Responses API answer, OpenAI's or xAI's: JSON text that must match
+    the verdict schema. A refusal or a cut-off answer blocks the action."""
+    meta: dict[str, Any] = {"usage": step.usage, "model": step.model, "request_id": step.request_id}
+    if step.stop_reason == "refusal":
+        return Verdict("block", "The monitor model declined to review this action.", error="refusal", **meta)
+    if step.stop_reason != "end_turn":
+        return Verdict("block", "The monitor's answer was cut off.", error=step.stop_reason, **meta)
+    return parse_verdict("".join(step.texts), meta)
 
 
 # --------------------------------------------------------------------------- Gemini
@@ -605,6 +636,116 @@ class GeminiMonitor(_Gemini):
         return parse_verdict(call["input"], meta)
 
 
+# --------------------------------------------------------------------------- xAI (Grok)
+
+# Grok 4.7 always returns its encrypted reasoning; the other models only when asked. With store=false,
+# it is how the model's earlier reasoning goes back to it.
+XAI_INCLUDE = ["reasoning.encrypted_content"]
+
+
+def xai_tools(tools: list[dict]) -> list[dict]:
+    # The flat Responses API shape, without strict: xAI always holds tool arguments to the schema.
+    return [
+        {
+            "type": "function",
+            "name": t["name"],
+            "description": t.get("description", ""),
+            "parameters": t["input_schema"],
+        }
+        for t in tools
+    ]
+
+
+def xai_usage(usage: dict | None) -> dict:
+    """In the Claude API's terms: cached reads are part of input_tokens, and caching has no write charge.
+    xAI's own example counts reasoning apart from output_tokens (32 in + 9 out + 110 reasoning = 151
+    total), where OpenAI counts it inside; total_tokens says which, and either way reasoning counts as
+    output."""
+    u = usage or {}
+    inp, out = int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0)
+    cached = int((u.get("input_tokens_details") or {}).get("cached_tokens") or 0)
+    reasoning = int((u.get("output_tokens_details") or {}).get("reasoning_tokens") or 0)
+    total = u.get("total_tokens")
+    return {
+        "input_tokens": max(0, inp - cached),
+        "output_tokens": max(out, int(total) - inp) if total is not None else out + reasoning,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": cached,
+    }
+
+
+class _XAI:
+    def __init__(self, model: str, effort: str, max_tokens: int, api_key: str | None, call=call_json):
+        self.model, self.effort, self.max_tokens = model, effort, max_tokens
+        self.info = _known(model)
+        self.key = api_key
+        self.call = call
+
+    def _ask(self, body: dict) -> Step:
+        data, headers = self.call(
+            "xai", "POST", base_url("xai") + "/responses", {"Authorization": f"Bearer {self.key}"}, body, timeout=600
+        )
+        request_id = headers.get("x-request-id")
+        if data.get("error") or data.get("status") == "failed":
+            message, code, _ = _error_fields("xai", data) if data.get("error") else ("the response failed", None, None)
+            raise ProviderError("xai", None, message, code=code, request_id=request_id)
+        step = openai_step(data, self.model, request_id, usage=xai_usage)
+        if model_info(step.model) is None:  # a name without a price would make the call count as free
+            step.model = self.model
+        return step
+
+
+class GrokAgent(_XAI):
+    """The assistant under test on xAI's Responses API. xAI's docs allow system, user and assistant
+    messages in any order, so operator notices go as system messages, as for current Claude models."""
+
+    def __init__(
+        self, model: str, effort: str = "medium", max_tokens: int = 32000, api_key: str | None = None, call=call_json
+    ):
+        super().__init__(model, effort, max_tokens, api_key, call)
+        self.notices = notices_channel(self.info)
+
+    def request(self, system: str, tools: list[dict], messages: list[dict]) -> dict:
+        # No reasoning.summary: xAI takes it only for compatibility and always returns the summary.
+        return {
+            "model": self.model,
+            "instructions": system,
+            "input": openai_input(messages, notices="system"),
+            "tools": xai_tools(tools),
+            "tool_choice": "auto",
+            "reasoning": {"effort": effort_for(self.info, self.effort)},
+            "include": XAI_INCLUDE,
+            "store": False,
+            "max_output_tokens": self.max_tokens,  # the visible answer only, not the reasoning
+        }
+
+    def respond(self, system: str, tools: list[dict], messages: list[dict]) -> Step:
+        return self._ask(self.request(system, tools, messages))
+
+
+class GrokMonitor(_XAI):
+    """Reviews one proposed action; the answer is JSON that must match the verdict schema."""
+
+    def __init__(
+        self, model: str, effort: str = "medium", max_tokens: int = 16000, api_key: str | None = None, call=call_json
+    ):
+        super().__init__(model, effort, max_tokens, api_key, call)
+
+    def request(self, system: str, prompt: str) -> dict:
+        return {
+            "model": self.model,
+            "instructions": system,
+            "input": [{"role": "user", "content": prompt}],
+            "reasoning": {"effort": effort_for(self.info, self.effort)},
+            "text": {"format": {"type": "json_schema", "name": "verdict", "schema": VERDICT_SCHEMA, "strict": True}},
+            "store": False,
+            "max_output_tokens": self.max_tokens,
+        }
+
+    def review(self, system: str, prompt: str, request: dict | None = None) -> Verdict:
+        return responses_verdict(self._ask(self.request(system, prompt)))
+
+
 # --------------------------------------------------------------------------- choosing and checking
 
 
@@ -614,6 +755,8 @@ def make_agent(model: str, effort: str, keys: dict[str, str | None]) -> Agent:
         return OpenAIAgent(model, effort, api_key=keys.get("openai"))
     if provider == "google":
         return GeminiAgent(model, effort, api_key=keys.get("google"))
+    if provider == "xai":
+        return GrokAgent(model, effort, api_key=keys.get("xai"))
     return AnthropicAgent(model, effort=effort, api_key=keys.get("anthropic"))
 
 
@@ -623,14 +766,53 @@ def make_monitor(model: str, effort: str, keys: dict[str, str | None]) -> Monito
         return OpenAIMonitor(model, effort, api_key=keys.get("openai"))
     if provider == "google":
         return GeminiMonitor(model, effort, api_key=keys.get("google"))
+    if provider == "xai":
+        return GrokMonitor(model, effort, api_key=keys.get("xai"))
     return AnthropicMonitor(model, effort=effort, api_key=keys.get("anthropic"))
 
 
-def _lookup(provider: str, model: str, key: str, call) -> dict:
-    """A free model lookup (no tokens): GET /models/{id}."""
-    headers = {"Authorization": f"Bearer {key}"} if provider == "openai" else {"x-goog-api-key": key}
-    data, _ = call(provider, "GET", f"{base_url(provider)}/models/{model}", headers, None, timeout=20, retries=1)
+def _get(provider: str, path: str, key: str, call) -> dict:
+    """A free lookup (no tokens), such as GET /models/{id}."""
+    headers = {"x-goog-api-key": key} if provider == "google" else {"Authorization": f"Bearer {key}"}
+    data, _ = call(provider, "GET", f"{base_url(provider)}{path}", headers, None, timeout=20, retries=1)
     return data
+
+
+def _key_error(provider: str, exc: ProviderError) -> str | None:
+    """The check's error when a lookup failed because of the key or the connection, not the model."""
+    p = PROVIDERS[provider]
+    text = str(exc).lower()
+    bad_key = (
+        exc.status == 401
+        or exc.code in ("API_KEY_INVALID", "invalid_api_key")
+        or (provider == "google" and exc.status == 403 and "unregistered" in text)
+        or (provider == "xai" and exc.status == 400 and "api key" in text)  # "Incorrect API key provided"
+    )
+    if bad_key:
+        return f"The {p.name} API did not accept this key ({exc.status}). Copy it again from {p.console}."
+    if exc.status is None:
+        return f"Could not reach the {p.name} API. Check the internet connection."
+    return None
+
+
+def _xai_key_error(key: str, call) -> str | None:
+    """xAI's GET /api-key, also free, says whether the key or its team is blocked or disabled."""
+    try:
+        data = _get("xai", "/api-key", key, call)
+    except ProviderError as exc:
+        return _key_error("xai", exc)  # any other failure: the model lookups say more
+    states = [
+        state
+        for name, state in (
+            ("api_key_blocked", "the key is blocked"),
+            ("api_key_disabled", "the key is disabled"),
+            ("team_blocked", "its team is blocked"),
+        )
+        if data.get(name) is True
+    ]
+    if states:
+        return f"The xAI API will not take calls with this key: {' and '.join(states)}. See {PROVIDERS['xai'].console}."
+    return None
 
 
 def _check_http(
@@ -652,28 +834,23 @@ def _check_http(
         for row in rows:
             row["problems"].append(f"no {p.name} API key yet: add one above")
         return rows, None
+    if provider == "xai":
+        error = _xai_key_error(key, call)
+        if error:
+            return rows, error
     seen: dict[str, dict | ProviderError] = {}
     for row in rows:
         model = row["model"]
         if model not in seen:
             try:
-                seen[model] = _lookup(provider, model, key, call)
+                seen[model] = _get(provider, f"/models/{model}", key, call)
             except ProviderError as exc:
                 seen[model] = exc
         found = seen[model]
         if isinstance(found, ProviderError):
-            bad_key = (
-                found.status == 401
-                or found.code in ("API_KEY_INVALID", "invalid_api_key")
-                or (provider == "google" and found.status == 403 and "unregistered" in str(found).lower())
-            )
-            if bad_key:
-                return (
-                    rows,
-                    f"The {p.name} API did not accept this key ({found.status}). Copy it again from {p.console}.",
-                )
-            if found.status is None:
-                return rows, f"Could not reach the {p.name} API. Check the internet connection."
+            error = _key_error(provider, found)
+            if error or found.status is None:  # the key or the connection: the whole check stops
+                return rows, error
             row["problems"].append(
                 {
                     403: "this key may not use this model (403)",

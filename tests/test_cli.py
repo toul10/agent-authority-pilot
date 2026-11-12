@@ -33,3 +33,6 @@ def test_real_run_needs_a_key(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     assert main(["run", "--out", str(tmp_path / "x"), "--scenarios", "L01"]) == 2
     assert "No Anthropic API key found" in capsys.readouterr().out
+    assert main(["run", "--out", str(tmp_path / "y"), "--scenarios", "L01", "--model", "grok-4.7"]) == 2
+    out = capsys.readouterr().out
+    assert "No xAI API key found" in out and "key set --provider xai" in out and "XAI_API_KEY" in out

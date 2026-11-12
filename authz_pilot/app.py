@@ -104,8 +104,9 @@ STATIC = {
 MAX_BODY = 8 * 1024 * 1024  # far above any real form (see COUNTS in additions.py)
 RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,150}$")
 QUICK_START = ["L01", "T05"]  # one legit request and one trap, one message each
-API_NAMES = {"anthropic": "Claude API", "openai": "OpenAI API", "google": "Gemini API"}
-FAMILIES = {"anthropic": "Claude", "openai": "GPT", "google": "Gemini"}  # what the run button says it runs
+API_NAMES = {"anthropic": "Claude API", "openai": "OpenAI API", "google": "Gemini API", "xai": "xAI API"}
+# What the run button says it runs.
+FAMILIES = {"anthropic": "Claude", "openai": "GPT", "google": "Gemini", "xai": "Grok"}
 
 APP_CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; "
@@ -246,7 +247,7 @@ class App:
         ("POST", r"/api/scenarios", "save"),
         ("DELETE", r"/api/scenarios/([^/]+)", "delete_scenario"),
         ("POST", r"/api/key", "set_key"),
-        ("DELETE", r"/api/key(?:/(anthropic|openai|google))?", "delete_key"),
+        ("DELETE", rf"/api/key(?:/({'|'.join(PROVIDERS)}))?", "delete_key"),
         ("POST", r"/api/key/test", "test_key"),
         ("POST", r"/api/settings", "set_settings"),
         ("POST", r"/api/estimate", "estimate"),

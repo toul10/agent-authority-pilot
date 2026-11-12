@@ -2,7 +2,7 @@
 
 Both adapters are thin wrappers around `client.messages.create`, so tests can swap in
 scripted stand-ins (see scripted.py) or point the SDK at a local mock server. The
-OpenAI and Gemini adapters are in providers.py.
+OpenAI, Gemini and xAI adapters are in providers.py.
 """
 
 from __future__ import annotations
@@ -54,6 +54,8 @@ OLDER = "Claude, older"
 GPT = "GPT, from OpenAI"
 GEMINI = "Gemini, from Google"
 GEMINI_EFFORTS = ("low", "medium", "high")  # thinkingLevel; xhigh and max become high
+GROK = "Grok, from xAI"
+GROK_EFFORTS = ("low", "medium", "high", "xhigh")  # reasoning.effort; max becomes xhigh
 # The models you can pick. Each needs a price: without one, the spending limit could not count
 # what a run spends. Claude prices: https://platform.claude.com/docs/en/about-claude/pricing
 # (checked 2026-11-05). Mid-conversation system messages, effort levels and thinking per model:
@@ -134,6 +136,18 @@ MODEL_INFO: dict[str, ModelInfo] = {
         efforts=GEMINI_EFFORTS,
         system_messages=False,
     ),
+    # xAI, Responses API. Prices for prompts under 200K tokens (from 200K, every token of the request
+    # costs twice as much; the pilot's prompts stay far below that) and the "no role order limitation"
+    # that lets operator notices go as system messages: https://docs.x.ai/developers/models. Effort
+    # levels: the model pages there and https://docs.x.ai/developers/model-capabilities/text/reasoning
+    # (checked 2026-11-12). Prompt caching has no write charge. Left out: Grok 4.20 and Grok Build 0.1
+    # (their docs give no effort levels), the multi-agent model (no client-side function calls) and the
+    # non-reasoning one.
+    "grok-4.7": ModelInfo("Grok 4.7", (2.00, 6.00, 0.50), provider="xai", group=GROK, efforts=GROK_EFFORTS),
+    "grok-4.6": ModelInfo("Grok 4.6", (2.00, 6.00, 0.50), provider="xai", group=GROK, efforts=GROK_EFFORTS),
+    # The reasoning guide gives Grok 4.5 low, medium and high, and says xhigh counts as high.
+    "grok-4.5": ModelInfo("Grok 4.5", (2.00, 6.00, 0.30), provider="xai", group=GROK, efforts=GROK_EFFORTS[:3]),
+    "grok-4.3": ModelInfo("Grok 4.3", (1.25, 2.50, 0.20), provider="xai", group=GROK, efforts=GROK_EFFORTS),
 }
 MODELS = {m: info.name for m, info in MODEL_INFO.items()}
 PRICES = {m: info.price for m, info in MODEL_INFO.items()}

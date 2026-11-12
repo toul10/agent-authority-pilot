@@ -7,14 +7,15 @@ Where they live:
 - AUTHZ_PILOT_HOME overrides both.
 
 Each provider has its own API key (Anthropic for Claude, OpenAI, Google for
-Gemini), found in this order:
+Gemini, xAI for Grok), found in this order:
 
-1. the environment variable: ANTHROPIC_API_KEY, OPENAI_API_KEY, or
-   GEMINI_API_KEY (GOOGLE_API_KEY also works);
+1. the environment variable: ANTHROPIC_API_KEY, OPENAI_API_KEY,
+   GEMINI_API_KEY (GOOGLE_API_KEY also works) or XAI_API_KEY;
 2. the key saved with `python -m authz_pilot key set` or on the app's Settings
    page, in a file that only your user can read;
 3. on macOS, the Keychain item with the service name "anthropic-api-key",
-   "openai-api-key" or "gemini-api-key" (AUTHZ_PILOT_KEYCHAIN=0 turns this off).
+   "openai-api-key", "gemini-api-key" or "xai-api-key" (AUTHZ_PILOT_KEYCHAIN=0
+   turns this off).
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ PROVIDERS = {
     "google": Provider(
         "Google", ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "gemini-api-key", "gemini-api-key", "Google AI Studio"
     ),
+    "xai": Provider("xAI", ("XAI_API_KEY",), "xai-api-key", "xai-api-key", "the xAI Console"),
 }
 KEYCHAIN_SERVICE = PROVIDERS["anthropic"].keychain
 LIMITS = {"max_cost": (0.01, 1000.0), "max_steps": (1, 20), "workers": (1, 16)}
@@ -238,5 +240,5 @@ def mask(key: str | None) -> str:
     """Enough to recognise a key, never enough to use it."""
     if not key:
         return ""
-    prefix = next((p for p in ("sk-ant-", "sk-proj-", "sk-", "AIza") if key.startswith(p)), "")
+    prefix = next((p for p in ("sk-ant-", "sk-proj-", "sk-", "AIza", "xai-") if key.startswith(p)), "")
     return prefix + "…" + key[-4:]

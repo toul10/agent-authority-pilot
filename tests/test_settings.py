@@ -66,6 +66,7 @@ def test_key_problems_and_mask():
     with pytest.raises(ValueError):
         save_key("not a key")
     assert mask(FAKE) == "sk-ant-…abcd" and FAKE not in mask(FAKE)
+    assert mask("xai-fake-key-for-tests-0123456789wxyz") == "xai-…wxyz"
     assert mask(None) == ""
 
 

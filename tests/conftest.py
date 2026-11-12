@@ -17,8 +17,10 @@ def isolated(tmp_path, monkeypatch):
         "OPENAI_API_KEY",
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
+        "XAI_API_KEY",
         "AUTHZ_PILOT_OPENAI_BASE_URL",
         "AUTHZ_PILOT_GEMINI_BASE_URL",
+        "AUTHZ_PILOT_XAI_BASE_URL",
         "AUTHZ_PILOT_CUSTOM_WORLD",
     ):  # else the additions file sits wherever it points, not in tmp_path
         monkeypatch.delenv(name, raising=False)

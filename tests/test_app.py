@@ -442,6 +442,54 @@ def test_a_run_across_providers_needs_each_key_and_uses_the_mocks(app, monkeypat
         assert call(app, "DELETE", "/api/key/nobody")[0] == 404
 
 
+def test_a_grok_run_needs_its_key_and_sends_notices_as_system_messages(app, monkeypatch):
+    from mock_providers import XAI_KEY, MockXAI
+
+    with MockAPI() as claude, MockXAI() as xai:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", claude.url)
+        monkeypatch.setenv("AUTHZ_PILOT_XAI_BASE_URL", xai.url)
+        save_key(MOCK_KEY)
+        request = {
+            "scenarios": ["T13"],  # with an operator notice
+            "conditions": ["A", "C"],
+            "mode": "claude",
+            "model": "grok-4.7",
+            "effort": "xhigh",  # its highest; the app offers no max for Grok
+            "monitor_model": "claude-sonnet-5-5",
+            "confirm_spend": True,
+        }
+        status, _, body = call(app, "POST", "/api/runs", request)
+        assert status == 400 and body["missing_key"] == "xai" and "Add your xAI API key first" in body["error"]
+        assert not xai.requests and not claude.requests  # nothing was sent
+
+        assert call(app, "POST", "/api/key", {"key": XAI_KEY, "provider": "xai"})[0] == 200
+        status, _, view = call(app, "GET", "/api/status")
+        assert view["keys"]["xai"]["masked"] == "xai-…0000"
+        assert view["providers"]["xai"] == {
+            "name": "xAI",
+            "console": "the xAI Console",
+            "api": "xAI API",
+            "family": "Grok",
+        }
+        assert {m["id"]: m["efforts"] for m in view["models"] if m["provider"] == "xai"}["grok-4.5"] == [
+            "low",
+            "medium",
+            "high",
+        ]
+        status, _, body = call(app, "POST", "/api/runs", request)
+        assert status == 200
+        view = wait_for_run(app, body["name"])
+        assert view["status"] == "done" and view["config"]["notices"] == "system"
+        assert not any(r["stopped"] for r in view["rows"]) and all(r["cost"] > 0 for r in view["rows"])
+        grok = [r["body"] for r in xai.requests if r["method"] == "POST"]
+        assert {b["model"] for b in grok} == {"grok-4.7"} and {b["reasoning"]["effort"] for b in grok} == {"xhigh"}
+        assert {b["body"]["model"] for b in claude.requests if b["method"] == "POST"} == {"claude-sonnet-5-5"}
+        assert XAI_KEY not in json.dumps(view) and MOCK_KEY not in json.dumps(view)
+
+        status, _, body = call(app, "DELETE", "/api/key/xai")
+        assert status == 200 and body["removed"] and body["key"]["present"] is False
+
+
 def test_one_run_at_a_time(app):
     app.current = SimpleNamespace(name="busy", status="running")
     status, _, body = call(app, "POST", "/api/runs", {"scenarios": ["L01"], "conditions": ["A"], "mode": "dry"})

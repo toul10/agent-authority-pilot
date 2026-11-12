@@ -1,9 +1,10 @@
-"""Local stand-ins for the OpenAI Responses API and the Gemini API. They never contact OpenAI or Google.
+"""Local stand-ins for the OpenAI Responses API, the Gemini API and xAI's Responses API. They never
+contact OpenAI, Google or xAI.
 
 Each accepts one key and answers 400 to what the real API is documented to reject, plus a few
 rules of the pilot's own (marked "pilot rule"). Above all, they check that the pilot sends back
-what they handed out exactly: OpenAI's output items (encrypted reasoning, call ids, message
-phase) and Gemini's model turns (thought signatures), whole, unchanged and in order.
+what they handed out exactly: the output items of OpenAI and xAI (encrypted reasoning, call ids,
+message phase) and Gemini's model turns (thought signatures), whole, unchanged and in order.
 
 By default the assistant's first answer to each new message calls list_documents, and its
 answer to the tool result is a short text, so every episode exercises tool calls and replays.
@@ -14,6 +15,7 @@ To try the app with them, without real keys:
     python tests/mock_providers.py --port 8798
     AUTHZ_PILOT_OPENAI_BASE_URL=http://127.0.0.1:8798/openai/v1 OPENAI_API_KEY=sk-mock-openai-0000000000000000 \\
     AUTHZ_PILOT_GEMINI_BASE_URL=http://127.0.0.1:8798/gemini/v1beta GEMINI_API_KEY=AIzaMockGemini00000000000000000000000 \\
+    AUTHZ_PILOT_XAI_BASE_URL=http://127.0.0.1:8798/xai/v1 XAI_API_KEY=xai-mock-0000000000000000000000000000 \\
         python -m authz_pilot app
 """  # noqa: E501 (the shell example has to stay copy-pasteable)
 
@@ -29,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 OPENAI_KEY = "sk-mock-openai-0000000000000000"
 GEMINI_KEY = "AIzaMockGemini00000000000000000000000"
+XAI_KEY = "xai-mock-0000000000000000000000000000"
 
 # Written down here on their own (not read from the app's model table). Effort values from the
 # OpenAI model pages; thinking levels from the Gemini thinking guide.
@@ -267,8 +270,9 @@ class MockOpenAI(_Mock):
                     )
                 answered.add(item["call_id"])
             elif kind == "message":
-                if item.get("role") not in ("user", "developer", "system"):
-                    return f"Invalid role '{item.get('role')}'.", f"input[{i}].role"
+                problem = self.role_problem(item.get("role"))
+                if problem:
+                    return problem, f"input[{i}].role"
                 pending = [c for c in calls if c not in answered]
                 if pending:
                     return f"No tool output found for function call {pending[0]}.", f"input[{i}]"
@@ -277,6 +281,10 @@ class MockOpenAI(_Mock):
             i += 1
         pending = [c for c in calls if c not in answered]
         return (f"No tool output found for function call {pending[0]}.", "input") if pending else None
+
+    def role_problem(self, role) -> str | None:
+        """For an input message the pilot wrote (the model's own messages are checked as output items)."""
+        return None if role in ("user", "developer", "system") else f"Invalid role '{role}'."
 
     def default(self, body: dict) -> dict:
         self.n += 1
@@ -516,11 +524,222 @@ def candidate(model: str, parts: list, finish: str = "STOP", n: int = 0) -> dict
     }
 
 
+# --------------------------------------------------------------------------- xAI
+
+# Written down here on their own, from docs.x.ai (checked 2026-11-12): the reasoning efforts each model
+# takes (its model page and the reasoning guide), and its price per million tokens (input, cached input,
+# output), for the cost that xAI reports with each answer.
+XAI_MODELS = {
+    "grok-4.7": ({"low", "medium", "high", "xhigh"}, (2.00, 0.50, 6.00)),
+    "grok-4.6": ({"low", "medium", "high", "xhigh"}, (2.00, 0.50, 6.00)),
+    "grok-4.5": ({"low", "medium", "high", "xhigh"}, (2.00, 0.30, 6.00)),  # the guide: xhigh counts as high
+    "grok-4.3": ({"none", "low", "medium", "high", "xhigh"}, (1.25, 0.20, 2.50)),
+}
+# xAI's error bodies are {"code": <the status, described>, "error": <the message>}.
+XAI_CODES = {
+    400: "Client specified an invalid argument",
+    401: "Unauthenticated",
+    403: "The caller does not have permission to execute the specified operation",
+    404: "Some requested entity was not found",
+    429: "Some resource has been exhausted",
+}
+
+
+def xai_schema_problem(schema, where: str) -> str | None:
+    """What xAI's structured outputs guide says gets a 400: enum or anyOf without variants, a property
+    schema of true or false, minContains or maxContains, and items as an array."""
+    if not isinstance(schema, dict):
+        return None
+    for name in ("enum", "anyOf"):
+        if name in schema and not schema[name]:
+            return f"{where}.{name} needs at least one variant"
+    for name in ("minContains", "maxContains"):
+        if name in schema:
+            return f"{where}: {name} is not supported"
+    if isinstance(schema.get("items"), list):
+        return f"{where}.items must be one schema; use prefixItems for a tuple"
+    subs = [(f"{where}.properties.{k}", v) for k, v in (schema.get("properties") or {}).items()]
+    for path, sub in [*subs, (f"{where}.items", schema.get("items"))]:
+        if isinstance(sub, bool):
+            return f"{path}: a schema cannot be true or false"
+        problem = xai_schema_problem(sub, path)
+        if problem:
+            return problem
+    return None
+
+
+class MockXAI(MockOpenAI):
+    """POST /v1/responses, GET /v1/models/{id} and GET /v1/api-key, as on xAI's API. Earlier output
+    items must come back whole, unchanged and in order, as the OpenAI mock checks."""
+
+    def __init__(
+        self,
+        *,
+        key: str | None = None,
+        blocked: bool = False,
+        reasoning_inside: bool = False,
+        model_name: str | None = None,
+        **kwargs,
+    ):
+        super().__init__(key=key or XAI_KEY, **kwargs)
+        self.blocked = blocked  # GET /api-key reports the key as blocked
+        self.reasoning_inside = reasoning_inside  # usage counts reasoning inside output_tokens, as OpenAI's does
+        self.model_name = model_name  # what answers call the model; the requested id when None
+        self.usages: list[dict] = []  # the usage of every answer, in order
+
+    def _error(self, status: int, message: str, code=None, param=None, kind=None):
+        return status, {"code": XAI_CODES.get(status, "Unknown"), "error": message}, {}
+
+    def answer(self, method, path, body, headers):
+        auth = headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            return self._error(401, "No authorization header was provided.")
+        given = auth[len("Bearer ") :]
+        if self.key is not None and given != self.key:
+            return self._error(
+                400,
+                f"Incorrect API key provided: {given[:2]}***{given[-2:]}. You can obtain an API key from "
+                "https://console.x.ai.",
+            )
+        path = path.split("?")[0]
+        if method == "GET":
+            if path == "/v1/api-key":
+                info = {"api_key_id": "mock", "name": "mock", "redacted_api_key": "xai-…0000", "team_id": "mock"}
+                flags = {"api_key_blocked": self.blocked, "api_key_disabled": False, "team_blocked": False}
+                return 200, info | flags, {}
+            m = re.fullmatch(r"/v1/models/([\w.\-]+)", path)
+            if m and m.group(1) in XAI_MODELS:
+                return 200, {"id": m.group(1), "object": "model", "created": 1767225600, "owned_by": "xai"}, {}
+            name = m.group(1) if m else path
+            return self._error(404, f"The model {name} does not exist or your team does not have access to it.")
+        if path != "/v1/responses":
+            return self._error(404, "Not found.")
+        problem = self.rejection(body) if self.strict else None
+        if problem:
+            return self._error(400, problem[0])
+        queued = self.queued()
+        if queued and queued[0] != 200:
+            return queued[0], queued[1], {}
+        payload = queued[1] if queued else self.default(body)
+        self.remember(payload.get("output") or [])
+        self.usages.append(payload.get("usage") or {})
+        return 200, payload, {}
+
+    def rejection(self, body: dict) -> tuple[str, str | None] | None:
+        model = body.get("model")
+        if model not in XAI_MODELS:
+            return f"The model {model} does not exist or your team does not have access to it.", "model"
+        if "previous_response_id" in body:
+            return "pilot rule: no previous_response_id; the pilot sends the whole conversation", "previous_response_id"
+        if body.get("store") is not False:
+            return "pilot rule: store must be false", "store"
+        for name in ("presence_penalty", "frequency_penalty", "stop"):
+            if name in body:
+                return f"{name} cannot be used with reasoning models.", name
+        effort = (body.get("reasoning") or {}).get("effort")
+        if effort is not None and effort not in XAI_MODELS[model][0]:
+            return f"reasoning.effort {effort!r} is not supported by {model}.", "reasoning.effort"
+        if body.get("tools") and "reasoning.encrypted_content" not in (body.get("include") or []):
+            return (
+                "pilot rule: include reasoning.encrypted_content, so earlier reasoning can come back with store false",
+                "include",
+            )
+        for i, tool in enumerate(body.get("tools") or []):
+            if tool.get("type") != "function" or not tool.get("name"):
+                return "Each tool needs type function and a name.", f"tools[{i}]"
+            problem = xai_schema_problem(tool.get("parameters") or {}, f"tools[{i}].parameters")
+            if problem:
+                return problem, f"tools[{i}].parameters"
+        fmt = ((body.get("text") or {}).get("format")) or {}
+        if fmt.get("type") == "json_schema":
+            if not isinstance(fmt.get("schema"), dict):
+                return "text.format.schema is required for json_schema.", "text.format.schema"
+            problem = xai_schema_problem(fmt["schema"], "text.format.schema")
+            if problem:
+                return problem, "text.format.schema"
+        return self.input_problem(body.get("input"))
+
+    def role_problem(self, role) -> str | None:
+        if role == "developer":
+            return "pilot rule: xAI's docs name the roles system, user and assistant, not developer"
+        return None if role in ("user", "system") else f"Invalid role '{role}'."
+
+    def default(self, body: dict) -> dict:
+        self.n += 1
+        n = self.n
+        model = body.get("model", "")
+        # The summary always comes back; the encrypted reasoning from Grok 4.7 always, else when asked for.
+        reasoning: dict = {
+            "type": "reasoning",
+            "id": f"rs_mock{n}",
+            "status": "completed",
+            "summary": [{"type": "summary_text", "text": "Mock reasoning summary."}],
+        }
+        if model == "grok-4.7" or "reasoning.encrypted_content" in (body.get("include") or []):
+            reasoning["encrypted_content"] = secrets.token_urlsafe(24)
+        fmt = ((body.get("text") or {}).get("format")) or {}
+        last = (body.get("input") or [{}])[-1]
+        if fmt.get("type") == "json_schema":
+            output = [reasoning, self.message(n, json.dumps(ALLOW))]
+        elif last.get("type") == "function_call_output":
+            output = [reasoning, self.message(n, REPLY)]
+        else:
+            output = [
+                reasoning,
+                {
+                    "type": "function_call",
+                    "id": f"fc_mock{n}",
+                    "call_id": f"call_mock{n}",
+                    "name": "list_documents",
+                    "arguments": "{}",
+                    "status": "completed",
+                },
+            ]
+        return xai_response(model, output, n, reasoning_inside=self.reasoning_inside, name=self.model_name)
+
+    @staticmethod
+    def message(n: int, text: str) -> dict:
+        return {
+            "type": "message",
+            "id": f"msg_mock{n}",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": text, "logprobs": [], "annotations": []}],
+        }
+
+
+def xai_response(
+    model: str, output: list, n: int = 0, *, reasoning_inside: bool = False, name: str | None = None
+) -> dict:
+    """An answer whose usage has the shape of xAI's example: cached tokens inside input_tokens, reasoning
+    apart from output_tokens (or inside, to test both), and the cost xAI reports, in USD ticks (1e-10 USD)."""
+    inp, cached, out, reasoning = 1000, 600, 40, 80
+    price_in, price_cached, price_out = XAI_MODELS[model][1] if model in XAI_MODELS else (0.0, 0.0, 0.0)
+    usd = ((inp - cached) * price_in + cached * price_cached + (out + reasoning) * price_out) / 1e6
+    return {
+        "id": f"resp_mock{n}",
+        "object": "response",
+        "status": "completed",
+        "model": name or model,
+        "output": output,
+        "error": None,
+        "incomplete_details": None,
+        "usage": {
+            "input_tokens": inp,
+            "input_tokens_details": {"cached_tokens": cached},
+            "output_tokens": out + reasoning if reasoning_inside else out,
+            "output_tokens_details": {"reasoning_tokens": reasoning},
+            "total_tokens": inp + out + reasoning,
+            "cost_in_usd_ticks": round(usd * 1e10),
+        },
+    }
+
+
 class MockProviders:
-    """Both mocks on one port, under /openai and /gemini, for trying the app by hand."""
+    """The mocks on one port, under /openai, /gemini and /xai, for trying the app by hand."""
 
     def __init__(self, port: int):
-        self.openai, self.gemini = MockOpenAI(), MockGemini()
+        self.openai, self.gemini, self.xai = MockOpenAI(), MockGemini(), MockXAI()
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -528,7 +747,7 @@ class MockProviders:
 
             def _handle(self, method):
                 which, _, rest = self.path.lstrip("/").partition("/")
-                mock = {"openai": outer.openai, "gemini": outer.gemini}.get(which)
+                mock = {"openai": outer.openai, "gemini": outer.gemini, "xai": outer.xai}.get(which)
                 body = None
                 if method == "POST":
                     body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
@@ -569,6 +788,7 @@ if __name__ == "__main__":
     port = parser.parse_args().port
     mocks = MockProviders(port)
     print(f"Mock OpenAI API on http://127.0.0.1:{port}/openai/v1 (key {OPENAI_KEY})")
-    print(f"Mock Gemini API on http://127.0.0.1:{port}/gemini/v1beta (key {GEMINI_KEY}). Ctrl-C stops them.")
+    print(f"Mock Gemini API on http://127.0.0.1:{port}/gemini/v1beta (key {GEMINI_KEY})")
+    print(f"Mock xAI API on http://127.0.0.1:{port}/xai/v1 (key {XAI_KEY}). Ctrl-C stops them.")
     with contextlib.suppress(KeyboardInterrupt):
         mocks.server.serve_forever()

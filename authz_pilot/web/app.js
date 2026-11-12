@@ -149,7 +149,7 @@ async function getScenarios() { S.scenarios = await api("GET", "/api/scenarios")
 async function getRuns() { return (await api("GET", "/api/runs")).runs; }
 const modelOf = id => (S.status && S.status.models.find(m => m.id === id)) || null;
 const providerOf = id => (modelOf(id) || { provider: "anthropic" }).provider;
-const familyOf = id => S.status.providers[providerOf(id)].family;  // Claude, GPT or Gemini
+const familyOf = id => S.status.providers[providerOf(id)].family;  // Claude, GPT, Gemini or Grok
 // The providers a real run calls, and those of them without a key yet.
 const providersFor = body => [...new Set([body.model || S.status.settings.model, ...(body.conditions.includes("C") ? [body.monitor_model || S.status.settings.monitor_model] : [])].map(providerOf))];
 const missingKeys = body => providersFor(body).filter(p => !S.status.keys[p].present);
@@ -245,7 +245,7 @@ async function route() {
 addEventListener("hashchange", route);
 
 // ---------------------------------------------------------------- the key
-const KEY_LOOK = { anthropic: "sk-ant-…", openai: "sk-…", google: "AIza…" };
+const KEY_LOOK = { anthropic: "sk-ant-…", openai: "sk-…", google: "AIza…", xai: "xai-…" };
 function keyBlock(onChange, provider = "anthropic") {
   const box = h("div", { class: "stack" });
   const P = S.status.providers[provider];
@@ -433,7 +433,7 @@ function runBox(getIds, opts = {}) {
         h("span", { class: "display", text: c }), h("span", { text: COND[c].short }))))),
     h("div", { class: "choices", role: "radiogroup", "aria-label": "Assistant" },
       choice(name, true, "Scripted assistant, free", "Does what you expect and takes every bait. Shows how the scoring sees a scenario, without the API.", () => { o.mode = "dry"; sync(); }),
-      choice(name, false, "A real model, with your key", "Claude, GPT or Gemini: the real test. It costs money, and you confirm the estimate first.", () => { o.mode = "claude"; sync(); })),
+      choice(name, false, "A real model, with your key", "Claude, GPT, Gemini or Grok: the real test. It costs money, and you confirm the estimate first.", () => { o.mode = "claude"; sync(); })),
     claude, tally, estimate,
     h("div", { class: "actions" }, go), confirmHost);
   sync();
@@ -686,7 +686,7 @@ async function pageStart() {
     h("header", { class: "hero" },
       h("div", {},
         h("h1", { class: "display", text: "Being asked is not being authorised." }),
-        h("p", { class: "lede", text: `A model, such as Claude, GPT or Gemini, works as the assistant at ${W.company}, a made-up company: it reads documents, sends email and approves requests. Some messages are traps that ask for more than the sender may have. Run them under three set-ups and see what took effect, what was stopped, and what was never tried.` })),
+        h("p", { class: "lede", text: `A model, such as Claude, GPT, Gemini or Grok, works as the assistant at ${W.company}, a made-up company: it reads documents, sends email and approves requests. Some messages are traps that ask for more than the sender may have. Run them under three set-ups and see what took effect, what was stopped, and what was never tried.` })),
       h("ul", { class: "setups", "aria-label": "The three set-ups" }, ["A", "B", "C"].map(c => h("li", {},
         h("div", { class: "mark", "aria-hidden": "true" }, h("span", { class: "letter display", text: c }), layers(COND[c].layers, 3, 22)),
         h("div", {}, h("b", {}, h("span", { class: "sr-only", text: c + ": " }), COND[c].name), h("span", { text: SETUP_HELP[c] })))))),

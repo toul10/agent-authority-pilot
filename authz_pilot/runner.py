@@ -28,7 +28,7 @@ STOPS = ("refusal", "error", "provider_stop")
 
 
 class Agent(Protocol):
-    """The assistant under test: AnthropicAgent, OpenAIAgent, GeminiAgent, or a scripted stand-in."""
+    """The assistant under test: AnthropicAgent, OpenAIAgent, GeminiAgent, GrokAgent, or a scripted stand-in."""
 
     def respond(self, system: str, tools: list[dict], messages: list[dict]) -> Step: ...
 
@@ -40,7 +40,8 @@ class TurnAwareAgent(Agent, Protocol):
 
 
 class Monitor(Protocol):
-    """Reviews one proposed action in condition C: AnthropicMonitor, OpenAIMonitor, GeminiMonitor or ScriptedMonitor."""
+    """Reviews one proposed action in condition C: AnthropicMonitor, OpenAIMonitor, GeminiMonitor, GrokMonitor
+    or ScriptedMonitor."""
 
     def review(self, system: str, prompt: str, request: dict | None = None) -> Verdict: ...
 

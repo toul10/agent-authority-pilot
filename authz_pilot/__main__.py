@@ -3,7 +3,7 @@
 Usage:
     python -m authz_pilot app              # the local web app: quick start, settings, your scenarios, results
     python -m authz_pilot key set          # paste your Anthropic API key (hidden); key test checks it for free
-    python -m authz_pilot key set --provider openai    # or google: keys for GPT and Gemini models
+    python -m authz_pilot key set --provider openai    # or google, or xai: keys for GPT, Gemini and Grok
     python -m authz_pilot validate
     python -m authz_pilot run --dry-run
     python -m authz_pilot run --scenarios L01,T09 --conditions A
@@ -356,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--data", default=str(DEFAULT_DATA_DIR))
     a.set_defaults(func=cmd_app)
 
-    k = sub.add_parser("key", help="save, check or remove an API key (Anthropic, OpenAI or Google)")
+    k = sub.add_parser("key", help="save, check or remove an API key (Anthropic, OpenAI, Google or xAI)")
     k.add_argument(
         "action",
         choices=["set", "test", "status", "remove"],
@@ -378,7 +378,8 @@ def main(argv: list[str] | None = None) -> int:
     v.set_defaults(func=cmd_validate)
 
     r = sub.add_parser(
-        "run", help="run scenarios against a real model (Claude, GPT or Gemini), or --dry-run with a scripted agent"
+        "run",
+        help="run scenarios against a real model (Claude, GPT, Gemini or Grok), or --dry-run with a scripted agent",
     )
     r.add_argument("--conditions", default="A,B,C", help="comma-separated subset of A,B,C")
     r.add_argument(
